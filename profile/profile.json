@@ -1,0 +1,35 @@
+{
+  "name": "Wai Kit Chan",
+  "location": "Milton Keynes",
+
+  "target_roles": [
+    "Junior Data Analyst",
+    "Data Analyst",
+    "Commercial Analyst",
+    "MI Analyst",
+    "Reporting Analyst",
+    "Insight Analyst"
+  ],
+
+  "skills": [
+    "SQL",
+    "BigQuery",
+    "Power BI",
+    "Excel",
+    "Python"
+  ],
+
+  "projects": [
+    "UK Retail Dashboard",
+    "Wine Analytics Dashboard",
+    "Bellabeat Case Study"
+  ],
+
+  "background": [
+    "Luxury Retail",
+    "E-commerce",
+    "Commercial Analysis"
+  ],
+
+  "visa": "No sponsorship required"
+}

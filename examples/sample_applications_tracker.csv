@@ -1,0 +1,2 @@
+job_id,apply_link,company,job_title,source,record_source,current_status,highest_stage,status_date,apply_date,cv_used,cover_letter_used,notes
+fake-001,https://example.com/jobs/fake-data-analyst-123,Example Analytics Ltd,Junior Data Analyst,Company Careers,example,applied,applied,2026-06-17,2026-06-17,cvs/example_cv.pdf,cover_letters/example_cover.docx,Fake sample row only

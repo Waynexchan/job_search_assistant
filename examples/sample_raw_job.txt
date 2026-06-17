@@ -1,0 +1,11 @@
+Apply link: https://example.com/jobs/fake-data-analyst-123
+Source: Company Careers
+Job title: Junior Data Analyst
+Company: Example Analytics Ltd
+Location: Milton Keynes, Hybrid
+Salary: 30000 - 35000 per annum
+
+Full job description:
+Example Analytics Ltd is hiring a Junior Data Analyst to build Excel reports, support Power BI dashboards, and help stakeholders understand weekly operational KPIs.
+
+This is a permanent hybrid role suitable for an early-career analyst with SQL basics, strong Excel skills, and willingness to learn.

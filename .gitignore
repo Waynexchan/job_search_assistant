@@ -1,0 +1,61 @@
+# Secrets and credentials
+.env
+*.env
+config.py
+credentials.json
+token.json
+credentials/
+secrets/
+*.key
+
+# Gmail / Google OAuth
+gmail_credentials.json
+gmail_token.json
+*token*.json
+*credentials*.json
+
+# OpenAI / API logs
+logs/
+*.log
+
+# Generated outputs
+output/
+*.xlsx
+
+# Tracker and personal application history
+tracker/
+tracker/backups/
+
+# Raw job descriptions and API job cache
+jobs/raw_jobs/
+jobs/api_jobs.csv
+jobs/manual_jobs.csv
+
+# AI cache / usage cache
+data/
+cache/
+
+# Backups
+backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Personal documents
+cvs/
+cover_letters/
+*.pdf
+*.docx
+
+# Temporary files
+*.tmp
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
