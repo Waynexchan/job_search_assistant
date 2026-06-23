@@ -18,6 +18,9 @@ except ImportError:  # pragma: no cover - config exists in normal project runs.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_TIMEZONE = ZoneInfo("Europe/London")
 VALID_AI_ACTIONS = ["Apply Today", "Strong Consider", "Consider", "Low Priority", "Skip", "Manual Review"]
+VALID_AI_REVIEW_SOURCES = ["openai_new", "cache_exact", "cache_similar"]
+LEGACY_VALID_AI_REVIEW_SOURCES = ["api_new", *VALID_AI_REVIEW_SOURCES]
+PENDING_AI_REVIEW_SOURCES = ["", "nan", "none", "rule_based", "manual_pending"]
 AI_REVIEW_CACHE_VERSION = 2
 CACHE_COLUMNS = [
     "canonical_job_key",
@@ -115,12 +118,46 @@ def ensure_ai_columns(jobs):
             jobs[column] = ""
     source_replacements = {
         "": "rule_based",
-        "api": "api_new",
+        "api": "openai_new",
+        "api_new": "openai_new",
         "cache": "cache_exact",
         "api_error": "skipped_quota",
     }
-    jobs["ai_review_source"] = jobs["ai_review_source"].replace(source_replacements)
+    jobs["ai_review_source"] = jobs["ai_review_source"].fillna("").astype(str).str.strip().replace(source_replacements)
     return jobs
+
+
+def is_blank_value(value):
+    if pd.isna(value):
+        return True
+    return str(value).strip().lower() in ["", "nan", "none"]
+
+
+def is_truthy_value(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ["true", "1", "yes", "y"]
+
+
+def has_valid_ai_result(job):
+    return (
+        str(job.get("ai_review_source", "")).strip().lower() in LEGACY_VALID_AI_REVIEW_SOURCES
+        and str(job.get("ai_final_action", "")).strip() in VALID_AI_ACTIONS
+        and not is_blank_value(job.get("ai_fit_score", ""))
+    )
+
+
+def manual_job_needs_ai_review(job):
+    if str(job.get("input_type", "")).strip().lower() != "manual":
+        return False
+    source = str(job.get("ai_review_source", "")).strip().lower()
+    return (
+        source in PENDING_AI_REVIEW_SOURCES
+        or str(job.get("final_action", "")).strip() == "Pending AI Review"
+        or is_blank_value(job.get("ai_final_action", ""))
+        or is_blank_value(job.get("ai_fit_score", ""))
+        or is_truthy_value(job.get("would_send_to_ai", False))
+    )
 
 
 def read_table(path, columns):
@@ -303,6 +340,8 @@ def is_ai_candidate(job):
     input_type = str(job.get("input_type", "")).lower()
     if input_type == "api" and not bool(cfg("AI_BATCH_INCLUDE_API_LEADS", False)):
         return False
+    if input_type == "manual" and not manual_job_needs_ai_review(job):
+        return False
     pre_ai_bucket = str(job.get("pre_ai_bucket", ""))
     if pre_ai_bucket:
         if pre_ai_bucket not in ["ai_review_candidate", "rule_apply_today", "rule_strong_consider"]:
@@ -416,6 +455,8 @@ def get_ai_candidate_indexes(jobs, max_jobs, force_manual_review=False, force_fi
     )
     if "dedupe_key" in candidates.columns:
         candidates = candidates.drop_duplicates(subset=["dedupe_key"], keep="first")
+    if max_jobs is None:
+        return list(candidates.index)
     return list(candidates.index[:max_jobs])
 
 
@@ -688,7 +729,7 @@ def apply_review_result(jobs, row_index, result):
     jobs.at[row_index, "ai_fit_score_normalized"] = result.get("ai_fit_score_normalized", "")
     jobs.at[row_index, "ai_main_reason"] = result.get("ai_main_reason", "")
     jobs.at[row_index, "ai_red_flags"] = result.get("ai_red_flags", "")
-    jobs.at[row_index, "ai_review_source"] = "api_new"
+    jobs.at[row_index, "ai_review_source"] = "openai_new"
 
 
 def description_similarity(left_job, right_job):
@@ -784,10 +825,8 @@ def apply_ai_batch_reviews(
     usage_path = project_path(cfg("AI_REVIEW_USAGE_LOG_PATH", "logs/ai_api_usage_log.csv"))
 
     include_api_leads = bool(cfg("AI_BATCH_INCLUDE_API_LEADS", False))
-    candidate_pool = jobs[jobs.apply(is_ai_candidate, axis=1)].copy()
     manual_candidate_mask = (
         jobs["input_type"].astype(str).str.lower().eq("manual")
-        & jobs["pre_ai_bucket"].isin(["ai_review_candidate", "rule_apply_today", "rule_strong_consider"])
         & jobs["hard_skip_reason"].astype(str).str.strip().eq("")
         & ~jobs["previously_seen"].eq(True)
     )
@@ -799,12 +838,16 @@ def apply_ai_batch_reviews(
     )
     manual_full_jd_candidates = int(manual_candidate_mask.sum())
     api_lead_candidates = int(api_candidate_mask.sum())
-    candidate_indexes = get_ai_candidate_indexes(jobs, max_jobs, force_manual_review, force_files)
+    manual_valid_ai_result_before_cache = int(
+        (manual_candidate_mask & jobs.apply(has_valid_ai_result, axis=1)).sum()
+    )
+    candidate_indexes = get_ai_candidate_indexes(jobs, None, force_manual_review, force_files)
     cache = read_table(cache_path, CACHE_COLUMNS)
     usage_log = read_table(usage_path, USAGE_LOG_COLUMNS)
     usage_rows = []
     pending = []
     cache_hits = 0
+    manual_cache_hits = 0
     forced_manual_requeued = 0
     cache_invalid_rows = 0
     cache_invalid_requeued = 0
@@ -846,6 +889,8 @@ def apply_ai_batch_reviews(
                 apply_cache_result(jobs, row_index, cached_result, source=cache_source)
                 propagate_review_to_duplicates(jobs, row_index, cached_result, cache_source)
                 cache_hits += 1
+                if str(job.get("input_type", "")).lower() == "manual":
+                    manual_cache_hits += 1
             else:
                 jobs.at[row_index, "ai_review_source"] = "cache_invalid"
                 jobs.at[row_index, "ai_final_action"] = "Manual Review"
@@ -884,19 +929,29 @@ def apply_ai_batch_reviews(
     )
     pending_to_review = pending[:max_jobs_reviewed]
     batches = [pending_to_review[i : i + batch_size] for i in range(0, len(pending_to_review), batch_size)]
+    manual_pending = [item for item in pending if str(jobs.loc[item[0]].get("input_type", "")).lower() == "manual"]
+    manual_pending_to_review = [
+        item for item in pending_to_review if str(jobs.loc[item[0]].get("input_type", "")).lower() == "manual"
+    ]
+    manual_blocked_by_limit = max(0, len(manual_pending) - len(manual_pending_to_review))
     cache_invalid_sent_to_api = sum(1 for item in pending_to_review if len(item) > 4 and item[4] == "cache_invalid")
     cache_invalid_requeued = max(0, cache_invalid_rows - cache_invalid_sent_to_api)
 
     print("AI batch review preflight:")
     print(f"Manual full JD candidates: {manual_full_jd_candidates}")
-    print(f"Manual jobs with valid cache: {cache_hits}")
-    print(f"Manual jobs needing AI review: {len(pending)}")
+    print(f"Manual jobs with valid AI result: {manual_valid_ai_result_before_cache + manual_cache_hits}")
+    print(f"Manual jobs pending AI review: {len(manual_pending)}")
+    print(f"Manual jobs needing AI review this run: {len(manual_pending_to_review)}")
+    print(f"Manual jobs blocked by per-run limit: {manual_blocked_by_limit}")
+    if manual_blocked_by_limit:
+        print(f"Manual jobs remaining pending after this run: {manual_blocked_by_limit}")
     print(f"Manual jobs force re-review: {forced_manual_requeued}")
     print(f"API lead candidates: {api_lead_candidates}")
     print(f"AI_BATCH_INCLUDE_API_LEADS: {include_api_leads}")
     print(f"Valid cache hits: {cache_hits}")
     print(f"New jobs to review: {len(pending)}")
     print(f"Batch API calls needed: {len(batches)}")
+    print(f"Batch API calls allowed this run: {max_calls_allowed}")
     print(f"Model used: {model}")
 
     if not batches:
@@ -976,7 +1031,7 @@ def apply_ai_batch_reviews(
                     "company": job.get("company", ""),
                     "job_title": job.get("job_title", ""),
                     "model_used": model,
-                    "ai_review_source": "api_new",
+                    "ai_review_source": "openai_new",
                     "input_chars": len(prompt),
                     "description_chars": len(description),
                     "api_call_made": True,

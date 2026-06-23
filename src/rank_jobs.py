@@ -6,7 +6,15 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
-from src.ai_job_reviewer import apply_ai_batch_reviews, apply_ai_reviews
+from src.ai_job_reviewer import (
+    LEGACY_VALID_AI_REVIEW_SOURCES,
+    apply_ai_batch_reviews,
+    apply_ai_reviews,
+    has_valid_ai_result,
+    is_blank_value,
+    is_truthy_value,
+    manual_job_needs_ai_review,
+)
 
 try:
     import config
@@ -23,6 +31,7 @@ COMPANY_ALIASES_FILE = PROJECT_ROOT / "config" / "company_aliases.csv"
 OUTPUT_FILE = PROJECT_ROOT / "output" / "ranked_jobs.xlsx"
 ALL_OUTPUT_FILE = PROJECT_ROOT / "output" / "all_ranked_jobs.xlsx"
 AI_REVIEW_QUEUE_FILE = PROJECT_ROOT / "output" / "ai_review_queue.xlsx"
+MANUAL_AI_COVERAGE_AUDIT_FILE = PROJECT_ROOT / "output" / "manual_ai_coverage_audit.xlsx"
 API_LEADS_FILE = PROJECT_ROOT / "output" / "api_leads.xlsx"
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
 TRACKER_HISTORY_FILE = PROJECT_ROOT / "tracker" / "applications_history.xlsx"
@@ -1438,9 +1447,13 @@ def is_manual_job(job):
 
 
 def has_valid_ai_decision(job):
-    return str(job.get("ai_review_source", "")) in ["api_new", "cache_exact", "cache_similar"] and str(
-        job.get("ai_final_action", "")
-    ) in ["Apply Today", "Strong Consider", "Consider", "Low Priority", "Skip"]
+    return has_valid_ai_result(job) and str(job.get("ai_final_action", "")) in [
+        "Apply Today",
+        "Strong Consider",
+        "Consider",
+        "Low Priority",
+        "Skip",
+    ]
 
 
 def is_extremely_strong_api_job(job):
@@ -1664,7 +1677,7 @@ def get_pre_ai_reason(job):
 
 
 def would_send_to_ai(job):
-    if str(job.get("ai_review_source", "rule_based")) in ["api_new", "cache_exact", "cache_similar"]:
+    if str(job.get("ai_review_source", "rule_based")) in LEGACY_VALID_AI_REVIEW_SOURCES:
         return False
     return str(job.get("pre_ai_bucket", "")) in ["ai_review_candidate", "rule_apply_today", "rule_strong_consider"]
 
@@ -2620,7 +2633,7 @@ def apply_ai_decisions_to_final_action(jobs):
     if "rule_final_action_reason" not in jobs.columns:
         jobs["rule_final_action_reason"] = jobs["final_action_reason"]
     valid_actions = ["Apply Today", "Strong Consider", "Consider", "Low Priority", "Skip", "Manual Review"]
-    ai_source_mask = jobs["ai_review_source"].isin(["api_new", "cache_exact", "cache_similar"])
+    ai_source_mask = jobs.apply(has_valid_ai_result, axis=1)
     ai_action_mask = jobs["ai_final_action"].isin(valid_actions)
     ai_decision_mask = ai_source_mask & ai_action_mask
 
@@ -2698,6 +2711,134 @@ def should_show_cache_invalid_rule_fallback(job):
         and "rfq" not in str(job.get("red_flags", "")).lower()
         and "proposal" not in str(job.get("red_flags", "")).lower()
     )
+
+
+def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=False):
+    warnings = []
+    source = str(job.get("ai_review_source", "")).strip()
+    final_action = str(job.get("final_action", "")).strip()
+    title = str(job.get("job_title", "")).strip()
+    company = str(job.get("company", "")).strip()
+    parse_confidence = str(job.get("manual_parse_confidence", "")).strip()
+
+    if is_blank_value(job.get("ai_fit_score", "")) and coverage_status not in ["Tracker excluded", "Parse failed"]:
+        warnings.append("Manual job has no AI score")
+    if source.lower() == "rule_based":
+        warnings.append("Rule-based result still present after AI batch run")
+    if final_action == "Pending AI Review":
+        warnings.append("Pending AI Review remains")
+    if is_truthy_value(job.get("would_send_to_ai", False)) and not selected_for_ai_queue and coverage_status != "AI reviewed":
+        warnings.append("would_send_to_ai=True but not selected")
+    if parse_confidence == "Low" and company.lower() in ["", "unknown"]:
+        warnings.append("Suspicious company extraction")
+    if parse_confidence == "Low" and title.lower() in ["", "unknown"]:
+        warnings.append("Suspicious job title extraction")
+    return "; ".join(dict.fromkeys(warnings))
+
+
+def get_manual_ai_coverage_status(job, parse_failed=False, selected_for_ai_queue=False):
+    tracker_excluded = bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False))
+    ai_reviewed_source_and_score = (
+        str(job.get("ai_review_source", "")).strip().lower() in LEGACY_VALID_AI_REVIEW_SOURCES
+        and not is_blank_value(job.get("ai_fit_score", ""))
+    )
+    pending_signal = (
+        str(job.get("final_action", "")).strip() == "Pending AI Review"
+        or str(job.get("ai_review_source", "")).strip().lower() == "rule_based"
+        or is_blank_value(job.get("ai_fit_score", ""))
+    )
+    warning = get_manual_ai_coverage_warning(job, "", selected_for_ai_queue)
+
+    if parse_failed:
+        return "Parse failed"
+    if tracker_excluded:
+        return "Tracker excluded"
+    if ai_reviewed_source_and_score:
+        if pending_signal or is_truthy_value(job.get("would_send_to_ai", False)):
+            return "Needs investigation"
+        return "AI reviewed"
+    if "would_send_to_ai=True but not selected" in warning:
+        return "Needs investigation"
+    if pending_signal:
+        return "Pending AI review"
+    return "Needs investigation"
+
+
+def build_manual_ai_coverage_audit(manual_rows, manual_load_summary, manual_queue_files):
+    columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "final_action",
+        "ai_final_action",
+        "ai_fit_score",
+        "ai_review_source",
+        "would_send_to_ai",
+        "next_action",
+        "tracker_exact_match",
+        "tracker_overlay_reason",
+        "parse_status",
+        "coverage_status",
+        "coverage_warning",
+    ]
+    parse_failures = {
+        str(failure.get("file_name", "")): str(failure.get("reason", ""))
+        for failure in manual_load_summary.get("raw_parse_failures", [])
+    }
+    audit_rows = []
+    seen_files = set()
+
+    for _, job in manual_rows.sort_values(by=["file_name"]).iterrows():
+        file_name = str(job.get("file_name", ""))
+        seen_files.add(file_name)
+        parse_failed = file_name in parse_failures
+        selected_for_ai_queue = file_name in manual_queue_files
+        coverage_status = get_manual_ai_coverage_status(job, parse_failed, selected_for_ai_queue)
+        coverage_warning = get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue)
+        if parse_failed:
+            coverage_warning = append_text_flag(coverage_warning, parse_failures[file_name])
+        audit_rows.append(
+            {
+                "file_name": file_name,
+                "job_title": job.get("job_title", ""),
+                "company": job.get("company", ""),
+                "final_action": job.get("final_action", ""),
+                "ai_final_action": job.get("ai_final_action", ""),
+                "ai_fit_score": job.get("ai_fit_score", ""),
+                "ai_review_source": job.get("ai_review_source", ""),
+                "would_send_to_ai": job.get("would_send_to_ai", ""),
+                "next_action": job.get("next_action", ""),
+                "tracker_exact_match": job.get("tracker_exact_match", ""),
+                "tracker_overlay_reason": job.get("tracker_overlay_reason", ""),
+                "parse_status": "Parse failed" if parse_failed else "Parsed",
+                "coverage_status": coverage_status,
+                "coverage_warning": coverage_warning,
+            }
+        )
+
+    for file_name, reason in parse_failures.items():
+        if file_name in seen_files:
+            continue
+        audit_rows.append(
+            {
+                "file_name": file_name,
+                "job_title": "",
+                "company": "",
+                "final_action": "",
+                "ai_final_action": "",
+                "ai_fit_score": "",
+                "ai_review_source": "",
+                "would_send_to_ai": "",
+                "next_action": "",
+                "tracker_exact_match": "",
+                "tracker_overlay_reason": "",
+                "parse_status": "Parse failed",
+                "coverage_status": "Parse failed",
+                "coverage_warning": reason,
+            }
+        )
+
+    return pd.DataFrame(audit_rows, columns=columns)
 
 
 def recommend_next_action(
@@ -3416,6 +3557,7 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     api_leads = get_api_leads(ranked_jobs)
     manual_queue_candidate = ranked_jobs.apply(is_manual_job, axis=1)
     api_queue_candidate = ranked_jobs.apply(is_api_job, axis=1) & include_api_leads_in_ai_queue
+    manual_needs_ai_review_mask = manual_queue_candidate & ranked_jobs.apply(manual_job_needs_ai_review, axis=1)
     ai_review_queue = ranked_jobs[
         (
             (
@@ -3425,7 +3567,8 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
             | (
                 manual_queue_candidate
                 & (
-                    ranked_jobs["ai_review_source"].isin(["", "rule_based", "skipped_no_key", "skipped_quota", "cache_invalid"])
+                    manual_needs_ai_review_mask
+                    | ranked_jobs["ai_review_source"].isin(["", "rule_based", "none", "manual_pending", "skipped_no_key", "skipped_quota", "cache_invalid"])
                     | ranked_jobs["final_action"].isin(["Pending AI Review", "Consider"])
                     | ranked_jobs["ai_final_action"].eq("Manual Review")
                 )
@@ -3436,10 +3579,11 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
             )
         )
         & (
-            ranked_jobs["ai_review_source"].isin(["", "rule_based", "skipped_no_key", "skipped_quota"])
+            ranked_jobs["ai_review_source"].isin(["", "rule_based", "none", "manual_pending", "skipped_no_key", "skipped_quota"])
             | ranked_jobs["ai_review_source"].eq("cache_invalid")
             | ranked_jobs["ai_final_action"].eq("Manual Review")
             | ranked_jobs["needs_human_review"].eq(True)
+            | manual_needs_ai_review_mask
             | (
                 manual_queue_candidate
                 & ranked_jobs["final_action"].isin(["Pending AI Review", "Consider"])
@@ -3496,6 +3640,11 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         else:
             reason = "not eligible for AI review queue"
         manual_skipped.append((file_name, reason))
+    manual_ai_coverage_audit = (
+        build_manual_ai_coverage_audit(manual_rows, manual_load_summary, manual_queue_files)
+        if ai_review == "batch"
+        else pd.DataFrame()
+    )
 
     # Create the output folder if it does not already exist.
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -3509,8 +3658,13 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         shown_ranked_jobs.to_excel(OUTPUT_FILE, index=False)
         ai_review_queue.to_excel(AI_REVIEW_QUEUE_FILE, index=False)
         api_leads.to_excel(API_LEADS_FILE, index=False)
+        if ai_review == "batch":
+            manual_ai_coverage_audit.to_excel(MANUAL_AI_COVERAGE_AUDIT_FILE, index=False)
     except PermissionError:
-        print(f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, or {API_LEADS_FILE}")
+        print(
+            f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, "
+            f"{API_LEADS_FILE}, or {MANUAL_AI_COVERAGE_AUDIT_FILE}"
+        )
         print("Please close the Excel files if they are open, then run this script again.")
         raise SystemExit(1)
 
@@ -3530,6 +3684,22 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
             & ranked_jobs.apply(should_show_cache_invalid_rule_fallback, axis=1)
             & ranked_jobs["final_action"].isin(["Apply Today", "Strong Consider"])
         ).sum()
+    )
+    audit_status_counts = (
+        manual_ai_coverage_audit["coverage_status"].value_counts()
+        if ai_review == "batch" and not manual_ai_coverage_audit.empty
+        else pd.Series(dtype=int)
+    )
+    parsed_manual_jobs_count = max(
+        0,
+        int(manual_load_summary.get("raw_files_found", 0)) - len(manual_load_summary.get("raw_parse_failures", [])),
+    )
+    manual_ai_unreviewed = (
+        manual_ai_coverage_audit[
+            manual_ai_coverage_audit["coverage_status"].isin(["Pending AI review", "Needs investigation"])
+        ]
+        if ai_review == "batch" and not manual_ai_coverage_audit.empty
+        else pd.DataFrame()
     )
 
     print()
@@ -3561,6 +3731,21 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     print(f"Final Strong Consider count: {int(final_action_counts.get('Strong Consider', 0))}")
     print(f"Invalid cache rows excluded from ranked_jobs: {invalid_cache_excluded}")
     print(f"Rule-based fallback rows kept in ranked_jobs: {cache_invalid_rule_kept}")
+    if ai_review == "batch":
+        print()
+        print("Manual AI coverage audit:")
+        print(f"- Manual raw files found: {manual_load_summary.get('raw_files_found', 0)}")
+        print(f"- Parsed manual jobs: {parsed_manual_jobs_count}")
+        print(f"- AI reviewed: {int(audit_status_counts.get('AI reviewed', 0))}")
+        print(f"- Pending AI review: {int(audit_status_counts.get('Pending AI review', 0))}")
+        print(f"- Tracker excluded: {int(audit_status_counts.get('Tracker excluded', 0))}")
+        print(f"- Parse failed: {int(audit_status_counts.get('Parse failed', 0))}")
+        print(f"- Needs investigation: {int(audit_status_counts.get('Needs investigation', 0))}")
+        if not manual_ai_unreviewed.empty:
+            print(
+                "WARNING: Some manual jobs still do not have AI review results. "
+                "Check output/manual_ai_coverage_audit.xlsx."
+            )
     print(f"Apply now: {int(action_counts.get('Apply now', 0))}")
     print(f"Strong consider: {int(action_counts.get('Strong consider', 0))}")
     print(f"Review manually: {int(action_counts.get('Review manually', 0))}")
@@ -3568,6 +3753,8 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     print(f"Saved all ranked jobs to: {ALL_OUTPUT_FILE}")
     print(f"Saved ranked jobs to: {OUTPUT_FILE}")
     print(f"Saved AI review queue to: {AI_REVIEW_QUEUE_FILE}")
+    if ai_review == "batch":
+        print(f"Saved manual AI coverage audit to: {MANUAL_AI_COVERAGE_AUDIT_FILE}")
     print(f"Saved API leads to: {API_LEADS_FILE}")
 
     return {

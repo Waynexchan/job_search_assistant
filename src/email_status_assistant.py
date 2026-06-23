@@ -231,6 +231,22 @@ def clean_text(value):
     return html.unescape(str(value)).strip()
 
 
+def clean_extracted_company(value):
+    value = clean_text(value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[\s\.,;:!\?\)\]\}]+$", "", value)
+    value = re.sub(r"^[\s\(\[\{]+", "", value)
+    return value.strip()
+
+
+def clean_extracted_job_title(value):
+    value = clean_text(value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"[\s\.,;:!\?\)\]\}]+$", "", value)
+    value = re.sub(r"^[\s\(\[\{]+", "", value)
+    return value.strip()
+
+
 def normalize_for_match(value):
     value = clean_text(value).lower()
     value = re.sub(r"[^a-z0-9\s]", " ", value)
@@ -413,6 +429,10 @@ def extract_company_job_title_from_subject(subject):
             "job_title_only",
         ),
         (
+            r"application status for (?:the\s+)?(?P<job_title>.+?)\s+(?:role|position)$",
+            "job_title_only",
+        ),
+        (
             r"application for (?P<job_title>.+?) at (?P<company>.+)$",
             "job_title_company",
         ),
@@ -429,8 +449,8 @@ def extract_company_job_title_from_subject(subject):
     for pattern, _ in patterns:
         match = re.search(pattern, subject, flags=re.IGNORECASE)
         if match:
-            company = clean_text(match.groupdict().get("company", ""))
-            job_title = clean_text(match.groupdict().get("job_title", ""))
+            company = clean_extracted_company(match.groupdict().get("company", ""))
+            job_title = clean_extracted_job_title(match.groupdict().get("job_title", ""))
             return company, job_title
 
     return "", ""
@@ -440,6 +460,12 @@ def extract_company_job_title_from_body(body):
     """Extract company/job title from common application update body text."""
     body = clean_text(body)
     patterns = [
+        r"thanks for applying for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"thank you for applying for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"application for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"your application for the\s+(?P<job_title>.+?)\s+position\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"the\s+(?P<job_title>.+?)\s+position\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
         r"we greatly appreciate your interest in (?P<company>.+?) and the time you have invested to apply for (?P<job_title>.+?)(?:\.|\n)",
         r"interest in\s+(?:the\s+)?(?P<job_title>.+?)(?:\s+\([^)]+\))?\s+position\s+at\s+(?P<company>.+?)(?:\.|\n|$)",
         r"interest in\s+(?:the\s+)?(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|$)",
@@ -449,8 +475,8 @@ def extract_company_job_title_from_body(body):
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE | re.DOTALL)
         if match:
-            company = clean_text(match.group("company"))
-            job_title = clean_text(match.group("job_title"))
+            company = clean_extracted_company(match.group("company"))
+            job_title = clean_extracted_job_title(match.group("job_title"))
             return company, job_title
 
     return "", ""
@@ -466,6 +492,27 @@ def is_indeed_application_acknowledgement(email):
     sender = clean_text(email.get("sender", "")).lower()
     subject = clean_text(email.get("subject", ""))
     return "indeedapply@indeed.com" in sender and subject.lower().startswith("indeed application:")
+
+
+def extract_email_job_identity(email):
+    subject_company, subject_job_title = extract_company_job_title_from_subject(email.get("subject", ""))
+    body_company, body_job_title = extract_company_job_title_from_body(email.get("body", ""))
+
+    extracted_company = body_company or subject_company
+    extracted_job_title = subject_job_title
+    if body_job_title and (not extracted_job_title or is_requisition_reference(extracted_job_title)):
+        extracted_job_title = body_job_title
+    if body_company and body_job_title:
+        extracted_job_title = body_job_title
+
+    return {
+        "extracted_company": extracted_company,
+        "extracted_job_title": extracted_job_title,
+        "extracted_company_subject": subject_company,
+        "extracted_job_title_subject": subject_job_title,
+        "extracted_company_body": body_company,
+        "extracted_job_title_body": body_job_title,
+    }
 
 
 def has_strong_rejection_evidence(text):
@@ -821,12 +868,7 @@ def fetch_recent_emails(service, days=30, max_emails=20, verbose=True):
 
 def classify_email(email):
     """Classify an email conservatively and keep evidence for review."""
-    extracted_company, extracted_job_title = extract_company_job_title_from_subject(email["subject"])
-    if not extracted_company or not extracted_job_title:
-        body_company, body_job_title = extract_company_job_title_from_body(email["body"])
-        extracted_company = extracted_company or body_company
-        if body_job_title and (not extracted_job_title or is_requisition_reference(extracted_job_title)):
-            extracted_job_title = body_job_title
+    extracted_identity = extract_email_job_identity(email)
 
     text = f"{email['subject']} {email.get('snippet', '')} {email['body']}"
     if is_non_job_sender(email.get("sender", "")):
@@ -834,8 +876,7 @@ def classify_email(email):
             "detected_status": "ignore",
             "ignore_reason": "ignored because sender is an obvious non-job sender",
             "classification_evidence": "",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     pre_status_ignore_reason = get_pre_status_ignore_reason(email)
@@ -844,8 +885,7 @@ def classify_email(email):
             "detected_status": "ignore",
             "ignore_reason": pre_status_ignore_reason,
             "classification_evidence": "",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     if contains_phrase(text, "we have reviewed your application") and contains_phrase(text, "unfortunately"):
@@ -853,8 +893,7 @@ def classify_email(email):
             "detected_status": "rejected",
             "ignore_reason": "",
             "classification_evidence": "we have reviewed your application + unfortunately",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     # Strong application status classification takes priority over ignore.
@@ -864,8 +903,7 @@ def classify_email(email):
             "detected_status": "offer",
             "ignore_reason": "",
             "classification_evidence": f"matched phrase: {offer_phrase}",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     for status in ["final_interview", "interview", "assessment", "rejected"]:
@@ -875,8 +913,7 @@ def classify_email(email):
                 "detected_status": status,
                 "ignore_reason": "",
                 "classification_evidence": f"matched phrase: {phrase}",
-                "extracted_company": extracted_company,
-                "extracted_job_title": extracted_job_title,
+                **extracted_identity,
             }
 
     if is_indeed_application_acknowledgement(email):
@@ -884,8 +921,7 @@ def classify_email(email):
             "detected_status": "applied_acknowledgement",
             "ignore_reason": "",
             "classification_evidence": "Indeed application confirmation email",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     if has_application_acknowledgement_evidence(text):
@@ -893,8 +929,7 @@ def classify_email(email):
             "detected_status": "applied_acknowledgement",
             "ignore_reason": "",
             "classification_evidence": "application acknowledgement evidence",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     ignore_reason = get_ignore_reason(email)
@@ -904,16 +939,14 @@ def classify_email(email):
             "detected_status": "ignore",
             "ignore_reason": ignore_reason,
             "classification_evidence": "",
-            "extracted_company": extracted_company,
-            "extracted_job_title": extracted_job_title,
+            **extracted_identity,
         }
 
     return {
         "detected_status": "unknown",
         "ignore_reason": "",
         "classification_evidence": "",
-        "extracted_company": extracted_company,
-        "extracted_job_title": extracted_job_title,
+        **extracted_identity,
     }
 
 
@@ -933,6 +966,8 @@ def is_near_title_match(extracted_title, tracker_title):
 def score_match(email, tracker_row, classification):
     extracted_company = clean_text(classification.get("extracted_company", ""))
     extracted_job_title = clean_text(classification.get("extracted_job_title", ""))
+    body_company = clean_text(classification.get("extracted_company_body", ""))
+    body_job_title = clean_text(classification.get("extracted_job_title_body", ""))
 
     apply_link = clean_text(tracker_row.get("apply_link", ""))
     if apply_link:
@@ -948,10 +983,12 @@ def score_match(email, tracker_row, classification):
             return 0, "different company; extracted company does not match tracker company"
 
         if extracted_job_title and title_strength in ["exact", "near"]:
+            if body_company and body_job_title:
+                return 95, "body extracted company + exact/near job title"
             return 90, "exact company + exact/near job title"
 
         if extracted_job_title and title_strength == "partial":
-            return 80, "exact company + partial job title"
+            return 85, "exact company + fuzzy partial job title"
 
         if extracted_job_title:
             return 60, "company only; manual review only; job title mismatch or ambiguous"
@@ -971,13 +1008,25 @@ def find_best_tracker_match(email, tracker, classification):
     best_index = None
     best_confidence = 0
     best_reasons = ""
+    scored_matches = []
 
     for index, row in tracker.iterrows():
         confidence, reasons = score_match(email, row, classification)
+        if confidence >= 85:
+            scored_matches.append((index, confidence, reasons))
         if confidence > best_confidence:
             best_index = index
             best_confidence = confidence
             best_reasons = reasons
+
+    if len(scored_matches) > 1:
+        top_confidence = max(match[1] for match in scored_matches)
+        top_matches = [match for match in scored_matches if match[1] == top_confidence]
+        return (
+            top_matches[0][0],
+            84,
+            f"multiple tracker rows matched at >=85; best score {top_confidence}; manual review required",
+        )
 
     return best_index, best_confidence, best_reasons
 
@@ -991,6 +1040,7 @@ def validate_safe_update(classification, confidence, tracker_row=None):
     matched_company = clean_text(tracker_row.get("company", ""))
     matched_job_title = clean_text(tracker_row.get("job_title", ""))
 
+    unsafe_reasons = []
     company_match_pass = (
         not extracted_company
         or bool(matched_company and company_matches(extracted_company, matched_company))
@@ -999,6 +1049,7 @@ def validate_safe_update(classification, confidence, tracker_row=None):
     job_title_match_pass = (
         not extracted_job_title
         or bool(matched_job_title and title_strength in ["exact", "near"])
+        or bool(company_match_pass and matched_job_title and title_strength == "partial" and confidence >= 85)
     )
     status_can_update = detected_status in [
         "rejected",
@@ -1006,16 +1057,30 @@ def validate_safe_update(classification, confidence, tracker_row=None):
         "interview",
         "final_interview",
         "offer",
-        "applied_acknowledgement",
     ]
+    applied_acknowledgement_high_confidence = detected_status == "applied_acknowledgement" and confidence >= 95
+    if applied_acknowledgement_high_confidence:
+        status_can_update = True
+
+    if confidence < 85:
+        unsafe_reasons.append("match_score below 85")
+    if not company_match_pass:
+        unsafe_reasons.append("company mismatch")
+    if not job_title_match_pass:
+        unsafe_reasons.append("job title mismatch or not strong enough")
+    if detected_status == "applied_acknowledgement" and not applied_acknowledgement_high_confidence:
+        unsafe_reasons.append("applied acknowledgement requires very high confidence")
+    if not status_can_update:
+        unsafe_reasons.append(f"status '{detected_status}' is not allowed for automatic update")
+
     safe_to_update = bool(
         status_can_update
-        and confidence >= 80
+        and confidence >= 85
         and company_match_pass
         and job_title_match_pass
     )
 
-    return company_match_pass, job_title_match_pass, safe_to_update
+    return company_match_pass, job_title_match_pass, safe_to_update, "; ".join(dict.fromkeys(unsafe_reasons))
 
 
 def make_review_row(email, classification, confidence, reasons, tracker_row=None):
@@ -1028,7 +1093,7 @@ def make_review_row(email, classification, confidence, reasons, tracker_row=None
         and matched_tracker_file == "none"
         and not is_known_job_platform_or_ats(email.get("sender", ""))
     )
-    company_match_pass, job_title_match_pass, safe_to_update = validate_safe_update(
+    company_match_pass, job_title_match_pass, safe_to_update, unsafe_reason = validate_safe_update(
         classification,
         confidence,
         tracker_row,
@@ -1053,12 +1118,20 @@ def make_review_row(email, classification, confidence, reasons, tracker_row=None
         "classification_evidence": classification.get("classification_evidence", ""),
         "extracted_company": classification.get("extracted_company", ""),
         "extracted_job_title": classification.get("extracted_job_title", ""),
+        "extracted_job_title_subject": classification.get("extracted_job_title_subject", ""),
+        "extracted_company_subject": classification.get("extracted_company_subject", ""),
+        "extracted_job_title_body": classification.get("extracted_job_title_body", ""),
+        "extracted_company_body": classification.get("extracted_company_body", ""),
         "matched_company": clean_text(tracker_row.get("company", "")),
         "matched_job_title": clean_text(tracker_row.get("job_title", "")),
+        "matched_tracker_company": clean_text(tracker_row.get("company", "")),
+        "matched_tracker_job_title": clean_text(tracker_row.get("job_title", "")),
         "matched_job_id": clean_text(tracker_row.get("job_id", "")),
         "matched_tracker_file": matched_tracker_file,
         "match_confidence": confidence,
         "match_reason": reasons,
+        "match_explanation": reasons,
+        "unsafe_reason": unsafe_reason,
         "company_match_pass": company_match_pass,
         "job_title_match_pass": job_title_match_pass,
         "safe_to_update": safe_to_update,
@@ -1068,7 +1141,7 @@ def make_review_row(email, classification, confidence, reasons, tracker_row=None
 
 def should_update_tracker(status, confidence, tracker_row, classification):
     """Decide whether an email status is allowed to update tracker safely."""
-    _, _, safe_to_update = validate_safe_update(classification, confidence, tracker_row)
+    _, _, safe_to_update, _ = validate_safe_update(classification, confidence, tracker_row)
     return safe_to_update
 
 
@@ -1081,9 +1154,9 @@ def can_live_update_review_row(review_row):
 
     if detected_status == "ignore":
         return False
-    if detected_status == "applied_acknowledgement" and match_confidence < 80:
+    if detected_status == "applied_acknowledgement" and match_confidence < 95:
         return False
-    if match_confidence < 80:
+    if match_confidence < 85:
         return False
     if not safe_to_update:
         return False
