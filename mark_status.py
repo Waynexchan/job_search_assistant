@@ -9,6 +9,11 @@ import pandas as pd
 
 from src.rank_jobs import clean_apply_link, standardise_status
 
+try:
+    import config
+except ImportError:  # pragma: no cover - config exists in normal project runs.
+    config = None
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
@@ -17,6 +22,12 @@ STATUS_HISTORY_FILE = PROJECT_ROOT / "tracker" / "status_history.xlsx"
 STATS_FILE = PROJECT_ROOT / "tracker" / "tracker_stats.xlsx"
 ALL_RANKED_JOBS_FILE = PROJECT_ROOT / "output" / "all_ranked_jobs.xlsx"
 RANKED_JOBS_FILE = PROJECT_ROOT / "output" / "ranked_jobs.xlsx"
+RAW_JOBS_DIR = PROJECT_ROOT / "jobs" / "raw_jobs"
+APPLIED_JOBS_DIR = PROJECT_ROOT / "jobs" / "applied_jobs"
+ARCHIVED_JOBS_DIR = PROJECT_ROOT / "jobs" / "archived_jobs"
+REJECTED_JOBS_DIR = PROJECT_ROOT / "jobs" / "rejected_jobs"
+INVALID_RAW_JOBS_DIR = RAW_JOBS_DIR / "_invalid"
+RAW_JOB_MOVEMENT_LOG_FILE = PROJECT_ROOT / "output" / "raw_job_file_movement_log.xlsx"
 
 TRACKER_COLUMNS = [
     "job_id",
@@ -37,6 +48,8 @@ TRACKER_COLUMNS = [
     "last_email_date",
     "created_date",
     "updated_date",
+    "raw_job_file_path",
+    "archived_raw_job_path",
 ]
 
 STATUS_HISTORY_COLUMNS = [
@@ -61,6 +74,9 @@ STATUS_SHORTCUTS = {
     "o": "offer",
     "r": "rejected",
     "w": "withdrawn",
+    "ni": "not_interested",
+    "not interested": "not_interested",
+    "skip": "skip",
     "e": "expired",
     "c": "closed",
 }
@@ -75,6 +91,8 @@ ALLOWED_STATUSES = [
     "offer",
     "rejected",
     "withdrawn",
+    "not_interested",
+    "skip",
     "expired",
     "closed",
 ]
@@ -89,7 +107,12 @@ STATUS_ORDER = {
     "offer": 6,
 }
 
-TERMINAL_STATUSES = ["offer", "rejected", "withdrawn", "expired", "closed"]
+TERMINAL_STATUSES = ["offer", "rejected", "withdrawn", "not_interested", "skip", "expired", "closed"]
+ARCHIVE_STATUSES = ["withdrawn", "not_interested", "skip"]
+
+
+def cfg(name, default):
+    return getattr(config, name, default) if config else default
 
 
 def clean_text(value):
@@ -245,6 +268,9 @@ def lookup_ranked_job(identifier):
         "apply_link": "",
         "company": "",
         "job_title": "",
+        "location": "",
+        "file_name": "",
+        "input_type": "",
         "source": "",
         "record_source": "manual_status_update",
         "cv_used": "",
@@ -282,6 +308,9 @@ def lookup_ranked_job(identifier):
         "apply_link": clean_apply_link(job.get("apply_link", "")),
         "company": job.get("company", ""),
         "job_title": job.get("job_title", ""),
+        "location": job.get("location", ""),
+        "file_name": job.get("file_name", ""),
+        "input_type": job.get("input_type", ""),
         "source": job.get("source", ""),
         "record_source": "manual_status_update",
         "cv_used": job.get("recommended_cv", ""),
@@ -347,6 +376,8 @@ def row_from_details(job_details, status, notes, existing_job_ids, fallback_iden
         "last_email_date": "",
         "created_date": today,
         "updated_date": today,
+        "raw_job_file_path": clean_text(job_details.get("raw_job_file_path", "")),
+        "archived_raw_job_path": clean_text(job_details.get("archived_raw_job_path", "")),
     }
 
 
@@ -476,6 +507,165 @@ def backup_tracker_files():
         print(f"Backup: {backup_path}")
 
 
+def ensure_raw_job_lifecycle_dirs():
+    for path in [RAW_JOBS_DIR, APPLIED_JOBS_DIR, ARCHIVED_JOBS_DIR, REJECTED_JOBS_DIR, INVALID_RAW_JOBS_DIR]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def sanitize_filename_part(value, fallback="unknown"):
+    value = clean_text(value)
+    value = re.sub(r"[<>:\"/\\|?*\x00-\x1f]+", "-", value)
+    value = re.sub(r"\s+", " ", value).strip(" .-_")
+    return value[:90] or fallback
+
+
+def unique_target_path(target_dir, filename):
+    target = target_dir / filename
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    counter = 2
+    while True:
+        candidate = target_dir / f"{stem}__{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def make_archived_raw_filename(status_date, company, job_title, original_filename):
+    original = sanitize_filename_part(Path(original_filename).name, "raw_job.txt")
+    if not original.lower().endswith(".txt"):
+        original = f"{original}.txt"
+    return (
+        f"{status_date}__"
+        f"{sanitize_filename_part(company)}__"
+        f"{sanitize_filename_part(job_title)}__"
+        f"{original}"
+    )
+
+
+def path_is_inside(path, parent):
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def existing_path_from_value(value):
+    value = clean_text(value)
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path if path.exists() else None
+
+
+def find_raw_job_source_path(changed_row, job_details):
+    for path_value in [
+        job_details.get("archived_raw_job_path", ""),
+        changed_row.get("archived_raw_job_path", ""),
+        job_details.get("raw_job_file_path", ""),
+        changed_row.get("raw_job_file_path", ""),
+    ]:
+        path = existing_path_from_value(path_value)
+        if path:
+            return path
+
+    file_name = clean_text(job_details.get("file_name", ""))
+    if file_name:
+        raw_path = RAW_JOBS_DIR / Path(file_name).name
+        if raw_path.exists():
+            return raw_path
+
+    return None
+
+
+def movement_log_row(action, old_path, new_path, company, job_title, status, reason, success, warning=""):
+    return {
+        "moved_at": datetime.now().isoformat(timespec="seconds"),
+        "action": action,
+        "old_path": str(old_path) if old_path else "",
+        "new_path": str(new_path) if new_path else "",
+        "company": clean_text(company),
+        "job_title": clean_text(job_title),
+        "status": status,
+        "reason": reason,
+        "success": bool(success),
+        "warning": warning,
+    }
+
+
+def append_raw_job_movement_log(row):
+    RAW_JOB_MOVEMENT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    columns = ["moved_at", "action", "old_path", "new_path", "company", "job_title", "status", "reason", "success", "warning"]
+    if RAW_JOB_MOVEMENT_LOG_FILE.exists():
+        log = pd.read_excel(RAW_JOB_MOVEMENT_LOG_FILE).fillna("")
+    else:
+        log = pd.DataFrame(columns=columns)
+    for column in columns:
+        if column not in log.columns:
+            log[column] = ""
+    log = pd.concat([log[columns], pd.DataFrame([row])], ignore_index=True)
+    log.to_excel(RAW_JOB_MOVEMENT_LOG_FILE, index=False)
+
+
+def get_lifecycle_target(status, source_path):
+    if status == "applied" and path_is_inside(source_path, RAW_JOBS_DIR):
+        return APPLIED_JOBS_DIR, "applied", "status marked applied"
+    if status == "rejected":
+        if path_is_inside(source_path, APPLIED_JOBS_DIR):
+            return REJECTED_JOBS_DIR, "rejected", "applied job later marked rejected"
+        if path_is_inside(source_path, RAW_JOBS_DIR) and bool(cfg("MOVE_REJECTED_RAW_JOBS", False)):
+            return REJECTED_JOBS_DIR, "rejected", "MOVE_REJECTED_RAW_JOBS enabled"
+    if status in ARCHIVE_STATUSES and bool(cfg("MOVE_ARCHIVED_RAW_JOBS", False)):
+        return ARCHIVED_JOBS_DIR, "archived", "MOVE_ARCHIVED_RAW_JOBS enabled"
+    return None, "", ""
+
+
+def move_raw_job_file_after_status_update(changed_row, job_details, status, status_date):
+    ensure_raw_job_lifecycle_dirs()
+    source_path = find_raw_job_source_path(changed_row, job_details)
+    company = changed_row.get("company", "") or job_details.get("company", "")
+    job_title = changed_row.get("job_title", "") or job_details.get("job_title", "")
+
+    if not source_path:
+        warning = ""
+        if status == "applied":
+            warning = "No matching raw job .txt file found; tracker status was updated but no file was moved."
+            print(f"Warning: {warning}")
+        append_raw_job_movement_log(
+            movement_log_row("not_found", "", "", company, job_title, status, "no matching source file", False, warning)
+        )
+        return None
+
+    if source_path.suffix.lower() != ".txt":
+        warning = f"Matched source is not a .txt file: {source_path}"
+        print(f"Warning: {warning}")
+        append_raw_job_movement_log(
+            movement_log_row("skipped", source_path, "", company, job_title, status, "not a txt file", False, warning)
+        )
+        return None
+
+    target_dir, action, reason = get_lifecycle_target(status, source_path)
+    if not target_dir:
+        append_raw_job_movement_log(
+            movement_log_row("skipped", source_path, "", company, job_title, status, "movement disabled or not applicable", True)
+        )
+        return None
+
+    filename = make_archived_raw_filename(status_date, company, job_title, source_path.name)
+    target_path = unique_target_path(target_dir, filename)
+    shutil.move(str(source_path), str(target_path))
+    append_raw_job_movement_log(
+        movement_log_row(action, source_path, target_path, company, job_title, status, reason, True)
+    )
+    print(f"Moved raw job file: {source_path} -> {target_path}")
+    return target_path
+
+
 def move_terminal_rows(active, history):
     terminal_mask = active["current_status"].isin(TERMINAL_STATUSES)
     terminal_rows = active[terminal_mask].copy()
@@ -494,6 +684,23 @@ def save_outputs(active, history, status_history):
     sync_tracker_file(HISTORY_FILE, history)
     append_status_history_file(STATUS_HISTORY_FILE, status_history)
     write_tracker_stats(active, history)
+
+
+def update_raw_job_archive_path(active, history, job_id, source_path, target_path):
+    if not target_path:
+        return active, history
+    job_id = clean_text(job_id)
+    for table in [active, history]:
+        if table.empty or "job_id" not in table.columns:
+            continue
+        mask = table["job_id"].astype(str) == job_id
+        if not mask.any():
+            continue
+        table.loc[mask, "archived_raw_job_path"] = str(target_path)
+        if source_path and "raw_job_file_path" in table.columns:
+            blank_raw_path = table.loc[mask, "raw_job_file_path"].astype(str).str.strip().eq("")
+            table.loc[mask, "raw_job_file_path"] = table.loc[mask, "raw_job_file_path"].where(~blank_raw_path, str(source_path))
+    return active, history
 
 
 def mark_status(identifier, status, notes, job_details_override=None):
@@ -539,6 +746,15 @@ def mark_status(identifier, status, notes, job_details_override=None):
     status_history = append_status_history(status_history, changed_row, status, notes)
     active, history = move_terminal_rows(active, history)
     save_outputs(active, history, status_history)
+    source_path_before_move = find_raw_job_source_path(changed_row, job_details)
+    moved_path = None
+    if status == "applied" or status == "rejected" or status in ARCHIVE_STATUSES:
+        moved_path = move_raw_job_file_after_status_update(changed_row, job_details, status, today)
+    if moved_path:
+        active, history = update_raw_job_archive_path(active, history, changed_row.get("job_id", ""), source_path_before_move, moved_path)
+        sync_tracker_file(TRACKER_FILE, active)
+        sync_tracker_file(HISTORY_FILE, history)
+        write_tracker_stats(active, history)
     return action, status, today
 
 

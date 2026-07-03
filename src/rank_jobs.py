@@ -1,3 +1,5 @@
+import hashlib
+import html
 import json
 import re
 from datetime import date, datetime, timedelta
@@ -32,6 +34,8 @@ OUTPUT_FILE = PROJECT_ROOT / "output" / "ranked_jobs.xlsx"
 ALL_OUTPUT_FILE = PROJECT_ROOT / "output" / "all_ranked_jobs.xlsx"
 AI_REVIEW_QUEUE_FILE = PROJECT_ROOT / "output" / "ai_review_queue.xlsx"
 MANUAL_AI_COVERAGE_AUDIT_FILE = PROJECT_ROOT / "output" / "manual_ai_coverage_audit.xlsx"
+MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE = PROJECT_ROOT / "output" / "manual_pre_ai_exclusion_audit.xlsx"
+RANKED_JOBS_EXCLUSION_AUDIT_FILE = PROJECT_ROOT / "output" / "ranked_jobs_exclusion_audit.xlsx"
 API_LEADS_FILE = PROJECT_ROOT / "output" / "api_leads.xlsx"
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
 TRACKER_HISTORY_FILE = PROJECT_ROOT / "tracker" / "applications_history.xlsx"
@@ -48,7 +52,15 @@ TRACKER_EXCLUDED_STATUSES = {
     "closed",
 }
 TRACKER_SIMILAR_REVIEW_STATUSES = TRACKER_EXCLUDED_STATUSES
-OPTIONAL_TRACKER_MATCH_COLUMNS = ["job_posted_date", "posted_date", "canonical_job_id"]
+OPTIONAL_TRACKER_MATCH_COLUMNS = [
+    "job_posted_date",
+    "posted_date",
+    "canonical_job_id",
+    "location",
+    "job_text",
+    "job_description",
+    "description_hash",
+]
 
 
 def cfg(name, default):
@@ -170,6 +182,22 @@ JUNIOR_KEYWORDS = [
 ]
 
 SENIOR_TITLE_KEYWORDS = ["senior", "lead", "manager", "head of"]
+SENIOR_LEADERSHIP_TITLE_PATTERNS = [
+    r"\bhead\s+of\b",
+    r"\bdirector\b",
+    r"\blead\s+manager\b",
+    r"\bsenior\s+manager\b",
+    r"\bprincipal\b",
+    r"\bstaff\b",
+    r"\bvp\b",
+    r"\bvice\s+president\b",
+    r"\bchief\b",
+    r"\bc[-\s]?suite\b",
+    r"\bcto\b",
+    r"\bcfo\b",
+    r"\bcoo\b",
+    r"\bcio\b",
+]
 
 BAD_FIT_KEYWORDS = [
     "marketing assistant",
@@ -453,6 +481,9 @@ def standardise_status(status):
         "expired": "expired",
         "closed": "closed",
         "c": "closed",
+        "not interested": "not_interested",
+        "not_interested": "not_interested",
+        "skip": "skip",
         "s": "shortlisted",
     }
 
@@ -468,11 +499,14 @@ def standardise_status(status):
 def detect_source_from_apply_link(apply_link, fallback_source="Unknown"):
     """Work out the job website from the apply link."""
     apply_link = str(apply_link).strip().lower()
+    fallback_source = str(fallback_source).strip()
 
     if "linkedin.com" in apply_link:
         return "LinkedIn"
     if "indeed.com" in apply_link:
         return "Indeed"
+    if "cord.co" in apply_link:
+        return "CORD"
     if "reed.co.uk" in apply_link:
         return "Reed"
     if "civilservicejobs.service.gov.uk" in apply_link:
@@ -485,7 +519,8 @@ def detect_source_from_apply_link(apply_link, fallback_source="Unknown"):
         return "Adzuna"
 
     # Backward compatibility: older files may still have a source line.
-    fallback_source = str(fallback_source).strip()
+    if fallback_source.lower() == "cord":
+        return "CORD"
     if fallback_source and fallback_source != "Unknown":
         return fallback_source
 
@@ -522,7 +557,10 @@ def normalize_url_for_match(url):
     path = re.sub(r"/+$", "", parsed.path)
     query = parse_qs(parsed.query)
     useful_query = {}
-    for key in ["jk", "vjk", "currentJobId", "redirect_url"]:
+    useful_query_keys = ["jk", "vjk", "currentJobId", "redirect_url"]
+    if "cord.co" in netloc:
+        useful_query_keys.extend(["jobId", "job_id", "job", "id"])
+    for key in useful_query_keys:
         if key in query and query[key]:
             useful_query[key.lower()] = query[key][0]
     if useful_query:
@@ -568,6 +606,23 @@ def extract_url_job_identifiers(url):
         match = re.search(r"/details/(\d+)", path)
         if match:
             identifiers.add(f"adzuna:{match.group(1).lower()}")
+
+    if "cord.co" in host:
+        for key in ["jobId", "job_id", "job", "id"]:
+            for value in query.get(key, []):
+                if str(value).strip():
+                    identifiers.add(f"cord:{str(value).strip().lower()}")
+        for pattern in [
+            r"/jobs/([a-z0-9_-]+)",
+            r"/job/([a-z0-9_-]+)",
+            r"/opportunities/([a-z0-9_-]+)",
+            r"/opportunity/([a-z0-9_-]+)",
+            r"/companies/[^/]+/jobs/([a-z0-9_-]+)",
+            r"/company/[^/]+/jobs/([a-z0-9_-]+)",
+        ]:
+            match = re.search(pattern, path)
+            if match:
+                identifiers.add(f"cord:{match.group(1).lower()}")
 
     return identifiers
 
@@ -1391,12 +1446,65 @@ def get_action_bucket_rank(action_bucket):
     order = {
         "Apply Today": 1,
         "Strong Consider": 2,
-        "Pending AI Review": 3,
-        "Consider": 3,
-        "Low Priority": 4,
-        "Skip": 5,
+        "Apply If Time": 3,
+        "Pending AI Review": 4,
+        "Manual Review": 4,
+        "Consider": 4,
+        "Low Priority": 5,
+        "Skip": 6,
     }
     return order.get(str(action_bucket), 99)
+
+
+def has_sponsorship_issue(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}\n{job.get('job_description', '')}".lower()
+    sponsorship_phrases = [
+        "unable to sponsor",
+        "cannot sponsor",
+        "do not sponsor",
+        "does not sponsor",
+        "will not sponsor",
+        "must have the right to work",
+        "must already have the right to work",
+        "no sponsorship",
+        "sponsorship is not available",
+    ]
+    return any(phrase in text for phrase in sponsorship_phrases)
+
+
+def has_senior_leadership_title(job):
+    title = str(job.get("job_title", "")).lower()
+    return any(re.search(pattern, title) for pattern in SENIOR_LEADERSHIP_TITLE_PATTERNS)
+
+
+def is_clearly_non_target_manual_role(job):
+    title = str(job.get("job_title", ""))
+    text = f"{title}\n{job.get('job_text', '')}\n{job.get('job_description', '')}"
+    if has_target_title_keyword(title) or has_strong_data_keywords(text):
+        return False
+    return bool(find_matches(title, IRRELEVANT_TITLE_KEYWORDS + BAD_FIT_KEYWORDS))
+
+
+def get_manual_pre_ai_exclusion(job):
+    if not str(job.get("job_text", "")).strip():
+        return "Empty or unreadable", "manual txt file is empty or unreadable"
+    if bool(job.get("manual_duplicate", False)):
+        return "Exact duplicate", "exact duplicate of another manual raw job"
+    if bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False)):
+        status = standardise_status(job.get("status", ""))
+        return "Exact tracker exclusion", f"exact tracker match already exists as {status or 'existing tracker row'}"
+    if is_contract_or_temporary_role(job):
+        return "Contract / FTC skipped", "contract/FTC/temporary/day-rate role"
+    if has_senior_leadership_title(job):
+        return "Senior leadership skipped", "senior leadership title"
+    if is_clearly_non_target_manual_role(job):
+        return "Non-target role skipped", "clearly not an analyst/data/business/reporting/commercial/finance-related role"
+    return "", ""
+
+
+def get_manual_safety_skip_reason(job):
+    _category, reason = get_manual_pre_ai_exclusion(job)
+    return reason
 
 
 def get_hard_skip_reason(job):
@@ -1410,7 +1518,7 @@ def get_hard_skip_reason(job):
 
     if status in ["expired", "closed"]:
         return "job is expired or closed"
-    if status in ["applied", "assessment", "interview", "final_interview", "offer", "rejected", "withdrawn"]:
+    if status in ["applied", "assessment", "interview", "final_interview", "offer", "rejected", "withdrawn", "not_interested", "skip"]:
         return f"already exists in tracker as {status}"
     if bool(job.get("previously_seen", False)):
         return str(job.get("tracker_exclusion_reason", "")) or "already exists in tracker"
@@ -1419,6 +1527,9 @@ def get_hard_skip_reason(job):
             return "manual txt file is empty or unreadable"
         if bool(job.get("manual_duplicate", False)):
             return "exact duplicate of another manual job"
+        manual_safety_skip = get_manual_safety_skip_reason(job)
+        if manual_safety_skip:
+            return manual_safety_skip
         return ""
 
     if "training programme / not a normal job" in red_flags or has_training_programme_flag(job):
@@ -1450,7 +1561,9 @@ def has_valid_ai_decision(job):
     return has_valid_ai_result(job) and str(job.get("ai_final_action", "")) in [
         "Apply Today",
         "Strong Consider",
+        "Apply If Time",
         "Consider",
+        "Manual Review",
         "Low Priority",
         "Skip",
     ]
@@ -1525,10 +1638,14 @@ def get_final_action_reason(job):
         return get_hard_skip_reason(job) or "hard skip condition"
     if final_action == "Pending AI Review":
         return "manual full JD awaiting AI review"
+    if final_action == "Manual Review":
+        return "manual AI score requires human review"
     if final_action == "Low Priority":
         return get_salary_seniority_risk(job) or get_junior_fit_reason(job)
     if final_action == "Apply Today":
         return "permanent junior-friendly analyst role with realistic salary, skills and location fit"
+    if final_action == "Apply If Time":
+        return "manual full JD has moderate AI fit; apply if daily capacity allows"
     return get_junior_fit_reason(job)
 
 
@@ -1569,9 +1686,32 @@ def get_ai_fit_score(job):
     return None if pd.isna(score) else int(max(0, min(100, round(float(score)))))
 
 
+def get_manual_final_action_from_ai_score(job):
+    score = get_ai_fit_score(job)
+    if score is None:
+        return ""
+    if score >= 80:
+        return "Apply Today"
+    if score >= 70:
+        return "Strong Consider"
+    if score >= 60:
+        return "Apply If Time"
+    if score >= 50:
+        return "Manual Review"
+    return "Skip"
+
+
+def get_manual_ai_threshold_reason(job):
+    score = get_ai_fit_score(job)
+    if score is None:
+        return ""
+    action = get_manual_final_action_from_ai_score(job)
+    return f"manual AI score {score}; threshold action {action}"
+
+
 def has_ai_review_inconsistency(job):
     action = str(job.get("ai_final_action", ""))
-    if action not in ["Apply Today", "Strong Consider"]:
+    if action not in ["Apply Today", "Strong Consider", "Apply If Time"]:
         return False
     score = get_ai_fit_score(job)
     if score is None:
@@ -1579,7 +1719,8 @@ def has_ai_review_inconsistency(job):
     return (
         (action == "Apply Today" and score < 80)
         or (action == "Strong Consider" and score < 70)
-        or (score < 50 and action in ["Apply Today", "Strong Consider"])
+        or (action == "Apply If Time" and score < 60)
+        or (score < 50 and action in ["Apply Today", "Strong Consider", "Apply If Time"])
     )
 
 
@@ -2457,6 +2598,7 @@ def get_api_leads(jobs):
         "tracker_exact_match",
         "tracker_similarity_match",
         "previous_similar_status",
+        "previous_application_status",
         "tracker_overlay_reason",
     ]
     for column in columns:
@@ -2476,6 +2618,8 @@ def is_actionable_status(job):
         "offer",
         "rejected",
         "withdrawn",
+        "not_interested",
+        "skip",
         "expired",
         "closed",
     }
@@ -2499,6 +2643,27 @@ def normalize_dedupe_text(text):
     text = str(text).lower()
     text = re.sub(r"\b(ltd|limited|plc|recruitment|group uk)\b", " ", text)
     text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_for_match(value):
+    """
+    Normalise general text for tracker matching.
+    Used for company, title, location and other non-URL text.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value)
+    text = html.unescape(text)
+    text = text.lower()
+    text = re.sub(r"[\u200b-\u200f\ufeff]", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -2632,7 +2797,7 @@ def apply_ai_decisions_to_final_action(jobs):
         jobs["rule_final_action"] = jobs["final_action"]
     if "rule_final_action_reason" not in jobs.columns:
         jobs["rule_final_action_reason"] = jobs["final_action_reason"]
-    valid_actions = ["Apply Today", "Strong Consider", "Consider", "Low Priority", "Skip", "Manual Review"]
+    valid_actions = ["Apply Today", "Strong Consider", "Apply If Time", "Consider", "Low Priority", "Skip", "Manual Review"]
     ai_source_mask = jobs.apply(has_valid_ai_result, axis=1)
     ai_action_mask = jobs["ai_final_action"].isin(valid_actions)
     ai_decision_mask = ai_source_mask & ai_action_mask
@@ -2642,7 +2807,18 @@ def apply_ai_decisions_to_final_action(jobs):
     ai_reason_mask = ai_decision_mask & jobs["ai_main_reason"].astype(str).str.strip().ne("")
     jobs.loc[ai_reason_mask, "final_action_reason"] = jobs.loc[ai_reason_mask, "ai_main_reason"]
 
-    manual_review_mask = ai_decision_mask & jobs["ai_final_action"].eq("Manual Review")
+    manual_ai_decision_mask = ai_decision_mask & jobs.apply(is_manual_job, axis=1)
+    if manual_ai_decision_mask.any():
+        manual_threshold_actions = jobs.loc[manual_ai_decision_mask].apply(get_manual_final_action_from_ai_score, axis=1)
+        manual_threshold_reasons = jobs.loc[manual_ai_decision_mask].apply(get_manual_ai_threshold_reason, axis=1)
+        jobs.loc[manual_ai_decision_mask, "final_action"] = manual_threshold_actions
+        reason_prefix = jobs.loc[manual_ai_decision_mask, "ai_main_reason"].astype(str).str.strip()
+        jobs.loc[manual_ai_decision_mask, "final_action_reason"] = [
+            "; ".join(filter(None, [prefix, threshold_reason]))
+            for prefix, threshold_reason in zip(reason_prefix, manual_threshold_reasons)
+        ]
+
+    manual_review_mask = ai_decision_mask & jobs["ai_final_action"].eq("Manual Review") & ~jobs.apply(is_manual_job, axis=1)
     if manual_review_mask.any():
         priority_scores = pd.to_numeric(jobs.loc[manual_review_mask, "apply_priority_score"], errors="coerce").fillna(0)
         fallback_mask = manual_review_mask & jobs["ai_red_flags"].astype(str).str.contains(
@@ -2665,7 +2841,7 @@ def apply_ai_decisions_to_final_action(jobs):
         ]
         jobs.loc[non_fallback_mask, "final_action_reason"] = "AI requested manual review"
 
-    inconsistency_mask = jobs.apply(has_ai_review_inconsistency, axis=1)
+    inconsistency_mask = jobs.apply(has_ai_review_inconsistency, axis=1) & ~jobs.apply(is_manual_job, axis=1)
     if inconsistency_mask.any():
         priority_scores = pd.to_numeric(jobs.loc[inconsistency_mask, "apply_priority_score"], errors="coerce").fillna(0)
         jobs.loc[inconsistency_mask, "ai_final_action"] = "Manual Review"
@@ -2713,6 +2889,98 @@ def should_show_cache_invalid_rule_fallback(job):
     )
 
 
+def get_ranked_jobs_exclusion_reason(job, included_indexes=None, deduped_indexes=None, allowed_actions=None):
+    included_indexes = included_indexes or set()
+    deduped_indexes = deduped_indexes or set()
+    allowed_actions = allowed_actions or ["Apply Today", "Strong Consider", "Apply If Time"]
+    reasons = []
+    if job.name in included_indexes:
+        return ""
+    if not is_manual_job(job):
+        reasons.append("not a manual raw job")
+    if str(job.get("final_action", "")) not in allowed_actions:
+        reasons.append("final_action is not a ranked_jobs action")
+    if not has_valid_ai_decision(job):
+        reasons.append("missing valid AI decision")
+    if not is_actionable_status(job):
+        reasons.append(f"tracker status is {standardise_status(job.get('status', ''))}")
+    if bool(job.get("previously_seen", False)):
+        reasons.append("exact tracker match already seen")
+    if str(job.get("hard_skip_reason", "")).strip():
+        reasons.append(str(job.get("hard_skip_reason", "")).strip())
+    if str(job.get("human_review_reason", "")) == "AI score/action inconsistency":
+        reasons.append("AI score/action inconsistency")
+    if str(job.get("human_review_reason", "")) == "AI cache invalid" and not should_show_cache_invalid_rule_fallback(job):
+        reasons.append("AI cache invalid")
+    if not should_show_cache_invalid_rule_fallback(job):
+        reasons.append("cache-invalid rule fallback not eligible")
+    if job.name not in deduped_indexes:
+        reasons.append("deduplicated in favour of another row")
+    if not reasons:
+        reasons.append("ranked_jobs filter mismatch")
+    return "; ".join(dict.fromkeys(reasons))
+
+
+def build_ranked_jobs_exclusion_audit(ranked_jobs, shown_ranked_jobs, deduped_ranked_jobs, allowed_daily_actions):
+    columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "final_action",
+        "ai_fit_score",
+        "should_be_in_ranked_jobs",
+        "included_in_ranked_jobs",
+        "exclusion_reason",
+        "tracker_overlay_reason",
+        "duplicate_reason",
+        "queue_reason",
+    ]
+    if ranked_jobs.empty:
+        return pd.DataFrame(columns=columns)
+    included_indexes = set(shown_ranked_jobs.index)
+    deduped_indexes = set(deduped_ranked_jobs.index)
+    candidates = ranked_jobs[
+        ranked_jobs.apply(is_manual_job, axis=1)
+        & ranked_jobs["final_action"].isin(allowed_daily_actions)
+    ].copy()
+    audit_rows = []
+    for _, job in candidates.iterrows():
+        included = job.name in included_indexes
+        if included:
+            continue
+        duplicate_reason = ""
+        if pd.to_numeric(job.get("duplicate_count", 1), errors="coerce") > 1:
+            duplicate_reason = f"duplicate_count={job.get('duplicate_count', '')}; merged_sources={job.get('merged_sources', '')}"
+        if job.name not in deduped_indexes:
+            duplicate_reason = append_text_flag(duplicate_reason, "deduplicated in favour of another row")
+        queue_reason = ""
+        if str(job.get("final_action", "")) in ["Manual Review", "Pending AI Review"]:
+            queue_reason = str(job.get("final_action_reason", ""))
+        elif str(job.get("human_review_reason", "")).strip():
+            queue_reason = str(job.get("human_review_reason", "")).strip()
+        audit_rows.append(
+            {
+                "file_name": job.get("file_name", ""),
+                "job_title": job.get("job_title", ""),
+                "company": job.get("company", ""),
+                "final_action": job.get("final_action", ""),
+                "ai_fit_score": job.get("ai_fit_score", ""),
+                "should_be_in_ranked_jobs": True,
+                "included_in_ranked_jobs": included,
+                "exclusion_reason": get_ranked_jobs_exclusion_reason(
+                    job,
+                    included_indexes=included_indexes,
+                    deduped_indexes=deduped_indexes,
+                    allowed_actions=allowed_daily_actions,
+                ),
+                "tracker_overlay_reason": job.get("tracker_overlay_reason", ""),
+                "duplicate_reason": duplicate_reason,
+                "queue_reason": queue_reason,
+            }
+        )
+    return pd.DataFrame(audit_rows, columns=columns)
+
+
 def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=False):
     warnings = []
     source = str(job.get("ai_review_source", "")).strip()
@@ -2720,14 +2988,29 @@ def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=F
     title = str(job.get("job_title", "")).strip()
     company = str(job.get("company", "")).strip()
     parse_confidence = str(job.get("manual_parse_confidence", "")).strip()
+    strict_excluded_statuses = [
+        "Strict excluded before AI",
+        "Exact duplicate",
+        "Empty or unreadable",
+        "Contract / FTC skipped",
+        "Exact tracker exclusion",
+        "Senior leadership skipped",
+        "Non-target role skipped",
+        "Tracker excluded",
+        "Parse failed",
+    ]
 
-    if is_blank_value(job.get("ai_fit_score", "")) and coverage_status not in ["Tracker excluded", "Parse failed"]:
+    if is_blank_value(job.get("ai_fit_score", "")) and coverage_status not in strict_excluded_statuses:
         warnings.append("Manual job has no AI score")
-    if source.lower() == "rule_based":
+    if source.lower() == "rule_based" and coverage_status not in strict_excluded_statuses:
         warnings.append("Rule-based result still present after AI batch run")
-    if final_action == "Pending AI Review":
+    if final_action == "Pending AI Review" and coverage_status not in strict_excluded_statuses:
         warnings.append("Pending AI Review remains")
-    if is_truthy_value(job.get("would_send_to_ai", False)) and not selected_for_ai_queue and coverage_status != "AI reviewed":
+    if (
+        is_truthy_value(job.get("would_send_to_ai", False))
+        and not selected_for_ai_queue
+        and coverage_status not in ["AI reviewed"] + strict_excluded_statuses
+    ):
         warnings.append("would_send_to_ai=True but not selected")
     if parse_confidence == "Low" and company.lower() in ["", "unknown"]:
         warnings.append("Suspicious company extraction")
@@ -2738,6 +3021,7 @@ def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=F
 
 def get_manual_ai_coverage_status(job, parse_failed=False, selected_for_ai_queue=False):
     tracker_excluded = bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False))
+    exclusion_category, _reason = get_manual_pre_ai_exclusion(job)
     ai_reviewed_source_and_score = (
         str(job.get("ai_review_source", "")).strip().lower() in LEGACY_VALID_AI_REVIEW_SOURCES
         and not is_blank_value(job.get("ai_fit_score", ""))
@@ -2751,6 +3035,8 @@ def get_manual_ai_coverage_status(job, parse_failed=False, selected_for_ai_queue
 
     if parse_failed:
         return "Parse failed"
+    if exclusion_category:
+        return exclusion_category
     if tracker_excluded:
         return "Tracker excluded"
     if ai_reviewed_source_and_score:
@@ -2762,6 +3048,46 @@ def get_manual_ai_coverage_status(job, parse_failed=False, selected_for_ai_queue
     if pending_signal:
         return "Pending AI review"
     return "Needs investigation"
+
+
+def build_manual_pre_ai_exclusion_audit(manual_rows):
+    columns = [
+        "file_name",
+        "parsed_job_title",
+        "parsed_company",
+        "parsed_location",
+        "exclusion_status",
+        "exclusion_reason",
+        "would_send_to_ai",
+        "strict_exclusion_category",
+        "notes",
+    ]
+    audit_rows = []
+    for _, job in manual_rows.sort_values(by=["file_name"]).iterrows():
+        category, reason = get_manual_pre_ai_exclusion(job)
+        would_send = is_truthy_value(job.get("would_send_to_ai", False))
+        if category:
+            status = "Strict excluded before AI"
+        elif would_send:
+            status = "Eligible for AI review"
+        elif has_valid_ai_result(job):
+            status = "AI reviewed"
+        else:
+            status = "Eligible pending review"
+        audit_rows.append(
+            {
+                "file_name": job.get("file_name", ""),
+                "parsed_job_title": job.get("job_title", ""),
+                "parsed_company": job.get("company", ""),
+                "parsed_location": job.get("location", ""),
+                "exclusion_status": status,
+                "exclusion_reason": reason,
+                "would_send_to_ai": job.get("would_send_to_ai", ""),
+                "strict_exclusion_category": category,
+                "notes": job.get("manual_parse_notes", ""),
+            }
+        )
+    return pd.DataFrame(audit_rows, columns=columns)
 
 
 def build_manual_ai_coverage_audit(manual_rows, manual_load_summary, manual_queue_files):
@@ -2985,6 +3311,22 @@ def same_known_posted_date(job, row):
     return bool(job_date and tracker_date and job_date == tracker_date)
 
 
+def normalize_description_for_match(value):
+    text = normalize_for_match(value)
+    return " ".join(text.split()[:800])
+
+
+def get_description_hash_for_match(row):
+    existing_hash = str(row.get("description_hash", "")).strip().lower()
+    if existing_hash:
+        return existing_hash
+    description = str(row.get("job_text", "") or row.get("job_description", "") or "")
+    normalized = normalize_description_for_match(description)
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def row_exact_match_reason(job, row, aliases):
     apply_link = normalize_url_for_match(job.get("apply_link", ""))
     tracker_link = normalize_url_for_match(row.get("apply_link", ""))
@@ -3009,8 +3351,23 @@ def row_exact_match_reason(job, row, aliases):
     tracker_company = normalize_company_for_match(row.get("company", ""), aliases)
     job_title = normalize_title_for_match(job.get("job_title", ""))
     tracker_title = normalize_title_for_match(row.get("job_title", ""))
-    if job_company and job_title and job_company == tracker_company and job_title == tracker_title and same_known_posted_date(job, row):
-        return "exact company + title + posted date match"
+    job_location = normalize_for_match(job.get("location", ""))
+    tracker_location = normalize_for_match(row.get("location", ""))
+    job_description_hash = get_description_hash_for_match(job)
+    tracker_description_hash = get_description_hash_for_match(row)
+    if (
+        job_company
+        and job_title
+        and job_location
+        and job_description_hash
+        and tracker_location
+        and tracker_description_hash
+        and job_company == tracker_company
+        and job_title == tracker_title
+        and job_location == tracker_location
+        and job_description_hash == tracker_description_hash
+    ):
+        return "exact company + title + location + description hash match"
 
     return ""
 
@@ -3048,6 +3405,7 @@ def get_tracker_overlay(job, tracker, aliases):
         "tracker_exact_match": False,
         "tracker_similarity_match": False,
         "previous_similar_status": "",
+        "previous_application_status": "",
     }
 
     if tracker.empty:
@@ -3099,6 +3457,7 @@ def get_tracker_overlay(job, tracker, aliases):
         "tracker_exact_match": False,
         "tracker_similarity_match": True,
         "previous_similar_status": status,
+        "previous_application_status": status,
     }
     if status == "rejected":
         overlay.update(
@@ -3187,7 +3546,7 @@ def apply_repost_candidate_annotations(jobs):
     return jobs
 
 
-def main(ai_review=None, force_manual_review=False, force_files=""):
+def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_calls=None):
     """Read raw job files, rank the jobs, then save an Excel file."""
     profile = load_profile()
     jobs = load_all_jobs()
@@ -3405,13 +3764,17 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     ranked_jobs["pre_ai_bucket"] = ranked_jobs.apply(get_pre_ai_bucket, axis=1)
     ranked_jobs["pre_ai_reason"] = ranked_jobs.apply(get_pre_ai_reason, axis=1)
 
+    ai_batch_status = {}
     if ai_review == "batch":
         ranked_jobs = apply_ai_batch_reviews(
             ranked_jobs,
             enabled=True,
             force_manual_review=force_manual_review,
             force_files=force_files,
+            manual_load_summary=manual_load_summary,
+            max_api_calls_per_run_override=ai_batch_calls,
         )
+        ai_batch_status = dict(ranked_jobs.attrs.get("ai_batch_status", {}))
     else:
         ranked_jobs = apply_ai_reviews(ranked_jobs, enabled=ai_review)
     ranked_jobs = apply_ai_decisions_to_final_action(ranked_jobs)
@@ -3433,9 +3796,15 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     ranked_jobs.loc[ranked_jobs["final_action"] == "Skip", "application_tier"] = "Skip"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Low Priority", "apply_recommendation"] = "Low priority"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Low Priority", "application_tier"] = "Tier 4 = Low Priority"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Manual Review", "apply_recommendation"] = "Manual review"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Manual Review", "application_tier"] = "Manual Review"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Manual Review", "next_action"] = "Review manually"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Consider", "apply_recommendation"] = "Consider"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Consider", "application_tier"] = "Tier 3 = Apply Only If High Score"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Consider", "next_action"] = "Review manually"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Apply If Time", "apply_recommendation"] = "Apply If Time"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Apply If Time", "application_tier"] = "Tier 3 = Apply If Time"
+    ranked_jobs.loc[ranked_jobs["final_action"] == "Apply If Time", "next_action"] = "Apply if time"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Pending AI Review", "apply_recommendation"] = "AI review"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Pending AI Review", "application_tier"] = "Pending AI Review"
     ranked_jobs.loc[ranked_jobs["final_action"] == "Pending AI Review", "next_action"] = "AI review full JD"
@@ -3530,6 +3899,7 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         "tracker_exact_match",
         "tracker_similarity_match",
         "previous_similar_status",
+        "previous_application_status",
         "tracker_overlay_reason",
         "tracker_exclusion_reason",
         "apply_link",
@@ -3538,21 +3908,28 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     ]
     all_ranked_jobs = ranked_jobs[output_columns]
     deduped_ranked_jobs = deduplicate_ranked_jobs(ranked_jobs)
-    allowed_daily_actions = ["Apply Today", "Strong Consider"] if STRICT_MODE else ["Apply Today", "Strong Consider", "Consider", "Low Priority"]
-    shown_ranked_jobs = deduped_ranked_jobs[
-        deduped_ranked_jobs.apply(should_show_in_main_output, axis=1)
+    allowed_daily_actions = ["Apply Today", "Strong Consider", "Apply If Time"] if STRICT_MODE else ["Apply Today", "Strong Consider", "Apply If Time", "Consider", "Low Priority"]
+    ranked_jobs_include_mask = (
+        deduped_ranked_jobs.apply(is_manual_job, axis=1)
         & deduped_ranked_jobs.apply(has_valid_ai_decision, axis=1)
         & deduped_ranked_jobs.apply(is_actionable_status, axis=1)
         & deduped_ranked_jobs["final_action"].isin(allowed_daily_actions)
         & (deduped_ranked_jobs["previously_seen"] != True)
-        & ((deduped_ranked_jobs["needs_human_review"] != True) | deduped_ranked_jobs["final_action"].eq("Strong Consider"))
+        & deduped_ranked_jobs["hard_skip_reason"].astype(str).str.strip().eq("")
         & (deduped_ranked_jobs["human_review_reason"] != "AI score/action inconsistency")
         & (
             (deduped_ranked_jobs["human_review_reason"] != "AI cache invalid")
             | deduped_ranked_jobs.apply(should_show_cache_invalid_rule_fallback, axis=1)
         )
         & deduped_ranked_jobs.apply(should_show_cache_invalid_rule_fallback, axis=1)
-    ][output_columns]
+    )
+    shown_ranked_jobs = deduped_ranked_jobs[ranked_jobs_include_mask][output_columns]
+    ranked_jobs_exclusion_audit = build_ranked_jobs_exclusion_audit(
+        ranked_jobs,
+        shown_ranked_jobs,
+        deduped_ranked_jobs,
+        allowed_daily_actions,
+    )
     include_api_leads_in_ai_queue = bool(cfg("AI_BATCH_INCLUDE_API_LEADS", False))
     api_leads = get_api_leads(ranked_jobs)
     manual_queue_candidate = ranked_jobs.apply(is_manual_job, axis=1)
@@ -3569,7 +3946,7 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
                 & (
                     manual_needs_ai_review_mask
                     | ranked_jobs["ai_review_source"].isin(["", "rule_based", "none", "manual_pending", "skipped_no_key", "skipped_quota", "cache_invalid"])
-                    | ranked_jobs["final_action"].isin(["Pending AI Review", "Consider"])
+                    | ranked_jobs["final_action"].isin(["Pending AI Review", "Manual Review", "Consider"])
                     | ranked_jobs["ai_final_action"].eq("Manual Review")
                 )
             )
@@ -3586,7 +3963,7 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
             | manual_needs_ai_review_mask
             | (
                 manual_queue_candidate
-                & ranked_jobs["final_action"].isin(["Pending AI Review", "Consider"])
+                & ranked_jobs["final_action"].isin(["Pending AI Review", "Manual Review", "Consider"])
             )
         )
         & (ranked_jobs["hard_skip_reason"].astype(str).str.strip() == "")
@@ -3627,21 +4004,30 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     ) if not manual_rows.empty else 0
     manual_hard_skipped = int(manual_rows["hard_skip_reason"].astype(str).str.strip().ne("").sum()) if not manual_rows.empty else 0
     manual_sent_to_queue = len(manual_queue_files)
-    manual_skipped = []
+    manual_not_sent_to_queue = []
     for _, manual_job in manual_rows.iterrows():
         file_name = str(manual_job.get("file_name", ""))
         if file_name in manual_queue_files:
             continue
         reason = ""
+        skipped_before_ai = False
         if bool(manual_job.get("previously_seen", False)):
             reason = str(manual_job.get("tracker_exclusion_reason", "")) or f"tracker status {manual_job.get('status', '')}"
         elif str(manual_job.get("hard_skip_reason", "")).strip():
             reason = str(manual_job.get("hard_skip_reason", "")).strip()
+            skipped_before_ai = True
+        elif has_valid_ai_result(manual_job):
+            reason = "already has valid AI review result"
         else:
-            reason = "not eligible for AI review queue"
-        manual_skipped.append((file_name, reason))
+            reason = "not currently pending AI review"
+        manual_not_sent_to_queue.append((file_name, reason, skipped_before_ai))
     manual_ai_coverage_audit = (
         build_manual_ai_coverage_audit(manual_rows, manual_load_summary, manual_queue_files)
+        if ai_review == "batch"
+        else pd.DataFrame()
+    )
+    manual_pre_ai_exclusion_audit = (
+        build_manual_pre_ai_exclusion_audit(manual_rows)
         if ai_review == "batch"
         else pd.DataFrame()
     )
@@ -3656,14 +4042,17 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     try:
         all_ranked_jobs.to_excel(ALL_OUTPUT_FILE, index=False)
         shown_ranked_jobs.to_excel(OUTPUT_FILE, index=False)
+        ranked_jobs_exclusion_audit.to_excel(RANKED_JOBS_EXCLUSION_AUDIT_FILE, index=False)
         ai_review_queue.to_excel(AI_REVIEW_QUEUE_FILE, index=False)
         api_leads.to_excel(API_LEADS_FILE, index=False)
         if ai_review == "batch":
             manual_ai_coverage_audit.to_excel(MANUAL_AI_COVERAGE_AUDIT_FILE, index=False)
+            manual_pre_ai_exclusion_audit.to_excel(MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE, index=False)
     except PermissionError:
         print(
             f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, "
-            f"{API_LEADS_FILE}, or {MANUAL_AI_COVERAGE_AUDIT_FILE}"
+            f"{API_LEADS_FILE}, {RANKED_JOBS_EXCLUSION_AUDIT_FILE}, {MANUAL_AI_COVERAGE_AUDIT_FILE}, "
+            f"or {MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}"
         )
         print("Please close the Excel files if they are open, then run this script again.")
         raise SystemExit(1)
@@ -3701,6 +4090,20 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         if ai_review == "batch" and not manual_ai_coverage_audit.empty
         else pd.DataFrame()
     )
+    manual_strict_excluded_before_ai = (
+        int(manual_pre_ai_exclusion_audit["strict_exclusion_category"].astype(str).str.strip().ne("").sum())
+        if ai_review == "batch" and not manual_pre_ai_exclusion_audit.empty
+        else manual_hard_skipped
+    )
+    manual_eligible_for_ai_review = max(0, len(manual_rows) - manual_strict_excluded_before_ai)
+    ranked_jobs_eligible = int(
+        (
+            ranked_jobs.apply(is_manual_job, axis=1)
+            & ranked_jobs["final_action"].isin(allowed_daily_actions)
+        ).sum()
+    )
+    ranked_jobs_written = len(shown_ranked_jobs)
+    ranked_jobs_excluded = len(ranked_jobs_exclusion_audit)
 
     print()
     print("Ranking summary:")
@@ -3713,22 +4116,34 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
     print(f"Similar applied/interview candidates kept for review: {similar_applied_interview_kept}")
     print(f"Manual jobs excluded by exact tracker match: {manual_excluded_tracker}")
     print(f"Manual jobs kept despite similar rejected history: {manual_kept_similar_rejected}")
-    print(f"Manual jobs hard skipped: {manual_hard_skipped}")
+    print(f"Manual jobs strict excluded before AI: {manual_strict_excluded_before_ai}")
+    print(f"Manual jobs eligible for AI review: {manual_eligible_for_ai_review}")
     print(f"Manual jobs sent to ai_review_queue: {manual_sent_to_queue}")
     for failure in manual_load_summary.get("raw_parse_failures", []):
         print(f"Manual raw parse fallback: {failure.get('file_name', '')} - {failure.get('reason', '')}")
-    for file_name, reason in manual_skipped:
-        print(f"Manual raw job skipped: {file_name} - {reason}")
+    for file_name, reason, skipped_before_ai in manual_not_sent_to_queue:
+        if skipped_before_ai:
+            print(f"Manual raw job skipped before AI: {file_name} - {reason}")
+        else:
+            print(f"Manual raw job not sent to ai_review_queue: {file_name} - {reason}")
     print(f"Total jobs collected: {len(load_api_jobs())}")
     print(f"Hard skipped: {int((all_ranked_jobs['pre_ai_bucket'] == 'hard_skip').sum())}")
     print(f"Duplicates removed: {int((duplicate_counts > 1).sum())}")
     print(f"Previously applied excluded: {tracker_exact_exclusions}")
     print(f"ranked_jobs count: {len(shown_ranked_jobs)}")
+    print(f"Ranked jobs eligible: {ranked_jobs_eligible}")
+    print(f"Ranked jobs written: {ranked_jobs_written}")
+    print(f"Ranked jobs excluded: {ranked_jobs_excluded}")
+    print(f"Ranked jobs exclusion audit path: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"ai_review_queue count: {len(ai_review_queue)}")
     print(f"api_leads count: {len(api_leads)}")
     print(f"all_ranked_jobs count: {len(all_ranked_jobs)}")
     print(f"Final Apply Today count: {int(final_action_counts.get('Apply Today', 0))}")
     print(f"Final Strong Consider count: {int(final_action_counts.get('Strong Consider', 0))}")
+    print(f"Final Apply If Time count: {int(final_action_counts.get('Apply If Time', 0))}")
+    print(f"Final Manual Review count: {int(final_action_counts.get('Manual Review', 0))}")
+    print(f"Final Skip count: {int(final_action_counts.get('Skip', 0))}")
+    print(f"Final Pending AI Review count: {int(final_action_counts.get('Pending AI Review', 0))}")
     print(f"Invalid cache rows excluded from ranked_jobs: {invalid_cache_excluded}")
     print(f"Rule-based fallback rows kept in ranked_jobs: {cache_invalid_rule_kept}")
     if ai_review == "batch":
@@ -3738,23 +4153,43 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         print(f"- Parsed manual jobs: {parsed_manual_jobs_count}")
         print(f"- AI reviewed: {int(audit_status_counts.get('AI reviewed', 0))}")
         print(f"- Pending AI review: {int(audit_status_counts.get('Pending AI review', 0))}")
+        print(f"- Strict excluded before AI: {manual_strict_excluded_before_ai}")
+        print(f"- Exact duplicate: {int(audit_status_counts.get('Exact duplicate', 0))}")
+        print(f"- Empty or unreadable: {int(audit_status_counts.get('Empty or unreadable', 0))}")
+        print(f"- Contract / FTC skipped: {int(audit_status_counts.get('Contract / FTC skipped', 0))}")
+        print(f"- Exact tracker exclusion: {int(audit_status_counts.get('Exact tracker exclusion', 0))}")
+        print(f"- Senior leadership skipped: {int(audit_status_counts.get('Senior leadership skipped', 0))}")
+        print(f"- Non-target role skipped: {int(audit_status_counts.get('Non-target role skipped', 0))}")
         print(f"- Tracker excluded: {int(audit_status_counts.get('Tracker excluded', 0))}")
         print(f"- Parse failed: {int(audit_status_counts.get('Parse failed', 0))}")
         print(f"- Needs investigation: {int(audit_status_counts.get('Needs investigation', 0))}")
+        if ai_batch_status.get("failed") or ai_batch_status.get("partial"):
+            print()
+            print("WARNING: AI batch review did not complete. Outputs may be partial.")
+            print(f"jobs requested for AI review: {ai_batch_status.get('jobs_requested', 0)}")
+            print(f"jobs successfully reviewed if known: {ai_batch_status.get('jobs_successfully_reviewed', 0)}")
+            print(f"jobs still pending AI review: {ai_batch_status.get('jobs_still_pending', int(audit_status_counts.get('Pending AI review', 0)))}")
+            if ai_batch_status.get("error_message"):
+                print(f"AI batch error: {ai_batch_status.get('error_type', '')}: {ai_batch_status.get('error_message', '')}")
+            print(f"next command to rerun: {ai_batch_status.get('next_command', 'python run_pipeline.py --ai-review-batch')}")
         if not manual_ai_unreviewed.empty:
+            print("Some eligible manual jobs still need AI review. Re-run: python run_pipeline.py --ai-review-batch")
             print(
                 "WARNING: Some manual jobs still do not have AI review results. "
                 "Check output/manual_ai_coverage_audit.xlsx."
             )
     print(f"Apply now: {int(action_counts.get('Apply now', 0))}")
     print(f"Strong consider: {int(action_counts.get('Strong consider', 0))}")
+    print(f"Apply if time: {int(action_counts.get('Apply if time', 0))}")
     print(f"Review manually: {int(action_counts.get('Review manually', 0))}")
     print(f"Skip: {int(action_counts.get('Skip', 0))}")
     print(f"Saved all ranked jobs to: {ALL_OUTPUT_FILE}")
     print(f"Saved ranked jobs to: {OUTPUT_FILE}")
+    print(f"Saved ranked jobs exclusion audit to: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"Saved AI review queue to: {AI_REVIEW_QUEUE_FILE}")
     if ai_review == "batch":
         print(f"Saved manual AI coverage audit to: {MANUAL_AI_COVERAGE_AUDIT_FILE}")
+        print(f"Saved manual pre-AI exclusion audit to: {MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}")
     print(f"Saved API leads to: {API_LEADS_FILE}")
 
     return {
@@ -3765,8 +4200,10 @@ def main(ai_review=None, force_manual_review=False, force_files=""):
         "api_leads": len(api_leads),
         "apply_now": int(action_counts.get("Apply now", 0)),
         "strong_consider": int(action_counts.get("Strong consider", 0)),
+        "apply_if_time": int(action_counts.get("Apply if time", 0)),
         "review_manually": int(action_counts.get("Review manually", 0)),
         "skip": int(action_counts.get("Skip", 0)),
+        "pending_ai_review": int(final_action_counts.get("Pending AI Review", 0)),
     }
 
 

@@ -1,6 +1,6 @@
 import base64
 from datetime import date, datetime, timedelta
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 import html
 from pathlib import Path
 import re
@@ -21,6 +21,7 @@ STATUS_HISTORY_FILE = PROJECT_ROOT / "tracker" / "status_history.xlsx"
 BACKUP_DIR = PROJECT_ROOT / "tracker" / "backups"
 REVIEW_FILE = PROJECT_ROOT / "output" / "email_status_review.xlsx"
 DRY_RUN_REVIEW_FILE = PROJECT_ROOT / "output" / "email_status_dry_run_review.xlsx"
+APPLIED_UPDATES_FILE = PROJECT_ROOT / "output" / "email_status_updates_applied.xlsx"
 
 GMAIL_READONLY_SCOPE = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -136,6 +137,45 @@ KNOWN_JOB_PLATFORM_OR_ATS_PHRASES = [
     "workday",
 ]
 
+COMPANY_ALIAS_DISPLAY = {
+    "ait homedelivery": "AIT Home Delivery",
+    "ait home delivery": "AIT Home Delivery",
+    "aithd": "AIT Home Delivery",
+    "ait home delivery recruitment team": "AIT Home Delivery",
+    "axis": "AXIS",
+    "axis capital": "AXIS",
+    "axis workday": "AXIS",
+    "axiscapital": "AXIS",
+    "houseful": "Houseful",
+    "innocent": "innocent",
+    "jobs justice gov": "Ministry of Justice",
+    "justice jobs": "Ministry of Justice",
+    "legal and general": "Legal & General",
+    "legal general": "Legal & General",
+    "legalandgeneral": "Legal & General",
+    "l and g": "Legal & General",
+    "l g": "Legal & General",
+    "ministry of justice": "Ministry of Justice",
+    "vitality": "Vitality",
+}
+
+COMPANY_ALIAS_NORMALIZED = {
+    "aithd": "aithomedelivery",
+    "aithomedelivery": "aithomedelivery",
+    "axis": "axis",
+    "axiscapital": "axis",
+    "houseful": "houseful",
+    "innocent": "innocent",
+    "jobsjusticegov": "ministryofjustice",
+    "justicejobs": "ministryofjustice",
+    "legalandgeneral": "legalgeneral",
+    "legalgeneral": "legalgeneral",
+    "landg": "legalgeneral",
+    "lg": "legalgeneral",
+    "ministryofjustice": "ministryofjustice",
+    "vitality": "vitality",
+}
+
 STRONG_APPLICATION_EVIDENCE = [
     "unfortunately",
     "unsuccessful",
@@ -228,19 +268,59 @@ STRICT_STATUS_PHRASES = {
 def clean_text(value):
     if pd.isna(value):
         return ""
-    return html.unescape(str(value)).strip()
+    value = html.unescape(str(value))
+    value = re.sub(r"[\u200b-\u200f\u202a-\u202e\ufeff]", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def normalize_alias_key(value):
+    value = clean_text(value).lower().replace("&", " and ")
+    value = re.sub(r"[^a-z0-9\s]", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def canonical_company_display(value):
+    value = clean_extracted_company(value)
+    key = normalize_alias_key(value)
+    compact = key.replace(" ", "")
+    display = COMPANY_ALIAS_DISPLAY.get(key) or COMPANY_ALIAS_DISPLAY.get(compact)
+    if display:
+        return display, value if value != display else ""
+    return value, ""
 
 
 def clean_extracted_company(value):
     value = clean_text(value)
+    value = re.sub(r"\bjob post\b", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"[\s\.,;:!\?\)\]\}]+$", "", value)
     value = re.sub(r"^[\s\(\[\{]+", "", value)
-    return value.strip()
+    value = value.strip()
+    invalid_values = {
+        "apply",
+        "saved",
+        "show match details",
+        "job post",
+        "your profile matches some required qualifications",
+        "your profile is missing required qualifications",
+        "application received",
+        "application sift results",
+        "application sift",
+    }
+    if normalize_alias_key(value) in invalid_values:
+        return ""
+    return value
 
 
 def clean_extracted_job_title(value):
     value = clean_text(value)
+    value = re.sub(r"\bjob post\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bapplication sift\s*-\s*results\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bapplication sift results\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*\d{4,}\s*-\s*", "", value)
+    value = re.sub(r"\s+\d{4,}\s*$", "", value)
+    value = re.sub(r"^\s*\d{4,}\s+", "", value)
     value = re.sub(r"\s+", " ", value)
     value = re.sub(r"[\s\.,;:!\?\)\]\}]+$", "", value)
     value = re.sub(r"^[\s\(\[\{]+", "", value)
@@ -260,6 +340,7 @@ def normalize_company(value):
     words = [word for word in normalized.split() if word not in words_to_remove]
     normalized = " ".join(words)
     compact = normalized.replace(" ", "")
+    compact = COMPANY_ALIAS_NORMALIZED.get(compact, compact)
 
     if compact in ["jdcom", "jd"]:
         return "jdcom"
@@ -407,15 +488,70 @@ def find_status_phrase(text, status):
     return ""
 
 
+def extract_company_from_sender(sender):
+    sender = clean_text(sender)
+    display_name, email_address = parseaddr(sender)
+    display_name = clean_extracted_company(display_name)
+    email_address = clean_text(email_address).lower()
+    domain_match = re.search(r"@([A-Za-z0-9.-]+)", email_address)
+    domain = domain_match.group(1).lower() if domain_match else ""
+    local_part = email_address.split("@", 1)[0] if "@" in email_address else email_address
+    candidates = [display_name, local_part, domain.replace(".", " ")]
+
+    sender_text = " ".join(candidates).lower()
+    if "jobs.justice.gov.uk" in domain:
+        return "Ministry of Justice", "jobs.justice.gov.uk"
+    if "eploymail.co.uk" in domain and "vitality" in sender_text:
+        return "Vitality", "eploymail Vitality sender"
+    if "workablemail.com" in domain and "houseful" in sender_text:
+        return "Houseful", "candidates.workablemail.com + Houseful sender"
+    if "smartrecruiters.com" in domain and ("legalandgeneral" in sender_text or "legal and general" in sender_text):
+        return "Legal & General", "LegalAndGeneral sender"
+    if "myworkday.com" in domain and ("axis" in sender_text or "axiscapital" in sender_text):
+        return "AXIS", "AXIS Workday sender"
+    if "aitworldwide.com" in domain and ("aithd" in sender_text or "ait" in sender_text):
+        return "AIT Home Delivery", "AITHD sender"
+
+    for candidate in candidates:
+        display, alias_used = canonical_company_display(candidate)
+        if alias_used:
+            return display, alias_used
+    return "", ""
+
+
 def extract_company_job_title_from_subject(subject):
     """Extract company/job title from common application email subject formats."""
     subject = clean_text(subject)
 
     indeed_match = re.search(r"^indeed application:\s*(?P<job_title>.+)$", subject, flags=re.IGNORECASE)
     if indeed_match:
-        return "", clean_text(indeed_match.group("job_title"))
+        return "", clean_extracted_job_title(indeed_match.group("job_title"))
 
     patterns = [
+        (
+            r"(?P<company>.+?)\s*\|\s*update on your job application\s+(?P<job_title>.+)$",
+            "company_job_title",
+        ),
+        (
+            r"thank you for your application to the\s+(?P<job_title>.+?)\s+position$",
+            "job_title_only",
+        ),
+        (
+            r"thank you for applying for the\s+(?P<job_title>.+?)\s+role\s+with\s+(?P<company>.+)$",
+            "job_title_company",
+        ),
+        (
+            r"(?P<reference>\d{3,})\s*-\s*(?P<job_title>.+?)(?:\s+\d{3,})?\s*-\s*application sift\s*-\s*results$",
+            "job_title_only",
+        ),
+        (
+            r"(?P<job_title>.+?)\s+-\s+(?P<company>[^-]+)$",
+            "job_title_company",
+        ),
+        (
+            r"your application for (?P<job_title>.+)$",
+            "job_title_only",
+        ),
         (
             r"your application to (?P<job_title>.+?) at (?P<company>.+)$",
             "job_title_company",
@@ -450,6 +586,7 @@ def extract_company_job_title_from_subject(subject):
         match = re.search(pattern, subject, flags=re.IGNORECASE)
         if match:
             company = clean_extracted_company(match.groupdict().get("company", ""))
+            company, _alias_used = canonical_company_display(company)
             job_title = clean_extracted_job_title(match.groupdict().get("job_title", ""))
             return company, job_title
 
@@ -460,8 +597,14 @@ def extract_company_job_title_from_body(body):
     """Extract company/job title from common application update body text."""
     body = clean_text(body)
     patterns = [
+        r"thank you for your application for the\s+(?P<job_title>.+?)\s+role(?:\.|\n|<|$)",
+        r"thank you for your application for the role of\s+(?P<job_title>.+?)\s+here\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"thank you for your application for the role of\s+(?P<job_title>.+?)(?:\.|\n|<|$)",
+        r"thank you for your online application for the position of\s+(?P<job_title>.+?)(?:\.|\n|<|$)",
         r"thanks for applying for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
         r"thank you for applying for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"(?P<job_title>.+?)\s+here\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
+        r"taking the time to apply for the\s+(?P<job_title>.+?)\s+role(?:\.|\n|<|$)",
         r"application for the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
         r"your application for the\s+(?P<job_title>.+?)\s+position\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
         r"the\s+(?P<job_title>.+?)\s+role\s+at\s+(?P<company>.+?)(?:\.|\n|<|$)",
@@ -475,7 +618,8 @@ def extract_company_job_title_from_body(body):
     for pattern in patterns:
         match = re.search(pattern, body, flags=re.IGNORECASE | re.DOTALL)
         if match:
-            company = clean_extracted_company(match.group("company"))
+            company = clean_extracted_company(match.groupdict().get("company", ""))
+            company, _alias_used = canonical_company_display(company)
             job_title = clean_extracted_job_title(match.group("job_title"))
             return company, job_title
 
@@ -497,17 +641,26 @@ def is_indeed_application_acknowledgement(email):
 def extract_email_job_identity(email):
     subject_company, subject_job_title = extract_company_job_title_from_subject(email.get("subject", ""))
     body_company, body_job_title = extract_company_job_title_from_body(email.get("body", ""))
+    sender_company, sender_alias = extract_company_from_sender(email.get("sender", ""))
 
-    extracted_company = body_company or subject_company
+    extracted_company = body_company or subject_company or sender_company
     extracted_job_title = subject_job_title
     if body_job_title and (not extracted_job_title or is_requisition_reference(extracted_job_title)):
         extracted_job_title = body_job_title
     if body_company and body_job_title:
         extracted_job_title = body_job_title
+    extracted_company, final_alias = canonical_company_display(extracted_company)
+    company_alias_used = final_alias or sender_alias
 
     return {
         "extracted_company": extracted_company,
         "extracted_job_title": extracted_job_title,
+        "sender_company_candidate": sender_company,
+        "subject_company_candidate": subject_company,
+        "body_company_candidate": body_company,
+        "final_extracted_company": extracted_company,
+        "final_extracted_job_title": extracted_job_title,
+        "company_alias_used": company_alias_used,
         "extracted_company_subject": subject_company,
         "extracted_job_title_subject": subject_job_title,
         "extracted_company_body": body_company,
@@ -1041,14 +1194,10 @@ def validate_safe_update(classification, confidence, tracker_row=None):
     matched_job_title = clean_text(tracker_row.get("job_title", ""))
 
     unsafe_reasons = []
-    company_match_pass = (
-        not extracted_company
-        or bool(matched_company and company_matches(extracted_company, matched_company))
-    )
+    company_match_pass = bool(extracted_company and matched_company and company_matches(extracted_company, matched_company))
     title_strength = title_match_strength(extracted_job_title, matched_job_title)
     job_title_match_pass = (
-        not extracted_job_title
-        or bool(matched_job_title and title_strength in ["exact", "near"])
+        bool(extracted_job_title and matched_job_title and title_strength in ["exact", "near"])
         or bool(company_match_pass and matched_job_title and title_strength == "partial" and confidence >= 85)
     )
     status_can_update = detected_status in [
@@ -1058,12 +1207,21 @@ def validate_safe_update(classification, confidence, tracker_row=None):
         "final_interview",
         "offer",
     ]
-    applied_acknowledgement_high_confidence = detected_status == "applied_acknowledgement" and confidence >= 95
+    tracker_status = standardise_status(tracker_row.get("current_status", ""))
+    applied_acknowledgement_high_confidence = (
+        detected_status == "applied_acknowledgement"
+        and confidence >= 95
+        and tracker_status in ["", "new", "saved", "shortlisted"]
+    )
     if applied_acknowledgement_high_confidence:
         status_can_update = True
 
     if confidence < 85:
         unsafe_reasons.append("match_score below 85")
+    if not extracted_company:
+        unsafe_reasons.append("company missing; title-only matches are unsafe")
+    if not extracted_job_title:
+        unsafe_reasons.append("job title missing")
     if not company_match_pass:
         unsafe_reasons.append("company mismatch")
     if not job_title_match_pass:
@@ -1118,10 +1276,16 @@ def make_review_row(email, classification, confidence, reasons, tracker_row=None
         "classification_evidence": classification.get("classification_evidence", ""),
         "extracted_company": classification.get("extracted_company", ""),
         "extracted_job_title": classification.get("extracted_job_title", ""),
+        "sender_company_candidate": classification.get("sender_company_candidate", ""),
+        "subject_company_candidate": classification.get("subject_company_candidate", ""),
+        "body_company_candidate": classification.get("body_company_candidate", ""),
+        "final_extracted_company": classification.get("final_extracted_company", ""),
+        "final_extracted_job_title": classification.get("final_extracted_job_title", ""),
         "extracted_job_title_subject": classification.get("extracted_job_title_subject", ""),
         "extracted_company_subject": classification.get("extracted_company_subject", ""),
         "extracted_job_title_body": classification.get("extracted_job_title_body", ""),
         "extracted_company_body": classification.get("extracted_company_body", ""),
+        "company_alias_used": classification.get("company_alias_used", ""),
         "matched_company": clean_text(tracker_row.get("company", "")),
         "matched_job_title": clean_text(tracker_row.get("job_title", "")),
         "matched_tracker_company": clean_text(tracker_row.get("company", "")),
@@ -1164,6 +1328,56 @@ def can_live_update_review_row(review_row):
         return False
 
     return True
+
+
+def make_applied_update_audit_row(run_timestamp, review_row, old_status, new_status):
+    return {
+        "run_timestamp": run_timestamp,
+        "email_date": review_row.get("email_date", ""),
+        "email_from": review_row.get("email_from", ""),
+        "email_subject": review_row.get("email_subject", ""),
+        "detected_status": review_row.get("detected_status", ""),
+        "matched_tracker_company": review_row.get("matched_tracker_company", ""),
+        "matched_tracker_job_title": review_row.get("matched_tracker_job_title", ""),
+        "matched_tracker_file": review_row.get("matched_tracker_file", ""),
+        "old_status": old_status,
+        "new_status": new_status,
+        "match_confidence": review_row.get("match_confidence", 0),
+        "match_explanation": review_row.get("match_explanation", ""),
+        "safe_update_reason": f"safe_to_update=True; {review_row.get('match_explanation', '')}",
+    }
+
+
+def save_applied_update_audit(update_rows):
+    if not update_rows:
+        return
+    APPLIED_UPDATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "run_timestamp",
+        "email_date",
+        "email_from",
+        "email_subject",
+        "detected_status",
+        "matched_tracker_company",
+        "matched_tracker_job_title",
+        "matched_tracker_file",
+        "old_status",
+        "new_status",
+        "match_confidence",
+        "match_explanation",
+        "safe_update_reason",
+    ]
+    updates = pd.DataFrame(update_rows)
+    for column in columns:
+        if column not in updates.columns:
+            updates[column] = ""
+    if APPLIED_UPDATES_FILE.exists():
+        existing = pd.read_excel(APPLIED_UPDATES_FILE).fillna("")
+        for column in columns:
+            if column not in existing.columns:
+                existing[column] = ""
+        updates = pd.concat([existing[columns], updates[columns]], ignore_index=True)
+    updates[columns].to_excel(APPLIED_UPDATES_FILE, index=False)
 
 
 def append_status_history(history, tracker_row, status, email):
@@ -1229,7 +1443,9 @@ def process_emails(dry_run=True, days=30, max_emails=20, verbose=True):
     history = load_status_history()
     emails = fetch_recent_emails(service, days=days, max_emails=max_emails, verbose=verbose)
     review_rows = []
+    applied_update_rows = []
     updated_count = 0
+    run_timestamp = datetime.now().isoformat(timespec="seconds")
     counts = {
         "ignored": 0,
         "rejected": 0,
@@ -1238,6 +1454,7 @@ def process_emails(dry_run=True, days=30, max_emails=20, verbose=True):
         "final_interview": 0,
         "offer": 0,
         "applied_acknowledgement": 0,
+        "high_confidence_tracker_matches": 0,
         "tracker_updates_possible": 0,
         "manual_review_required": 0,
     }
@@ -1261,13 +1478,19 @@ def process_emails(dry_run=True, days=30, max_emails=20, verbose=True):
         row_index, confidence, reasons = find_best_tracker_match(email, tracker, classification)
         tracker_row = tracker.loc[row_index] if row_index is not None else None
         review_row = make_review_row(email, classification, confidence, reasons, tracker_row)
+        if row_index is not None and confidence >= 85:
+            counts["high_confidence_tracker_matches"] += 1
 
         can_update = row_index is not None and can_live_update_review_row(review_row)
 
         if can_update:
             counts["tracker_updates_possible"] += 1
+            old_status = standardise_status(tracker.at[row_index, "current_status"])
+            new_status = "applied" if status == "applied_acknowledgement" else status
+            update_audit_row = make_applied_update_audit_row(run_timestamp, review_row, old_status, new_status)
             if not dry_run:
                 tracker, history = update_tracker_from_email(tracker, history, row_index, status, email)
+                applied_update_rows.append(update_audit_row)
             updated_count += 1
             if dry_run:
                 review_rows.append(review_row)
@@ -1275,10 +1498,13 @@ def process_emails(dry_run=True, days=30, max_emails=20, verbose=True):
             counts["manual_review_required"] += 1
             review_rows.append(review_row)
 
-    if not dry_run:
+    if not dry_run and applied_update_rows:
         backup_tracker_files(verbose=verbose)
         save_tracker(tracker)
         save_status_history(history)
+        save_applied_update_audit(applied_update_rows)
+    elif not dry_run and verbose:
+        print("No safe tracker updates found; tracker backups and writes skipped.")
 
     REVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
     review_file = DRY_RUN_REVIEW_FILE if dry_run else REVIEW_FILE
@@ -1291,5 +1517,7 @@ def process_emails(dry_run=True, days=30, max_emails=20, verbose=True):
         "review_file": review_file,
         "dry_run": dry_run,
         "review_rows": review_rows,
+        "applied_update_rows": applied_update_rows,
+        "applied_updates_file": APPLIED_UPDATES_FILE,
         "counts": counts,
     }

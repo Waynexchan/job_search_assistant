@@ -20,6 +20,12 @@ def parse_args():
         default="",
         help='Comma-separated manual raw job filenames to force re-review, e.g. "Wasabi Sushi & Bento.txt,barclays.txt".',
     )
+    parser.add_argument(
+        "--ai-batch-calls",
+        type=int,
+        default=None,
+        help="Override AI batch API calls allowed this run, e.g. --ai-batch-calls 1 for smaller safer runs.",
+    )
     parser.set_defaults(ai_review=None)
     return parser.parse_args()
 
@@ -42,6 +48,7 @@ def main():
         ai_review=args.ai_review,
         force_manual_review=args.force_manual_review,
         force_files=args.force_files,
+        ai_batch_calls=args.ai_batch_calls,
     )
     print()
     print("Pipeline complete.")

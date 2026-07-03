@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import socket
+import time
 from datetime import date, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -17,7 +19,7 @@ except ImportError:  # pragma: no cover - config exists in normal project runs.
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_TIMEZONE = ZoneInfo("Europe/London")
-VALID_AI_ACTIONS = ["Apply Today", "Strong Consider", "Consider", "Low Priority", "Skip", "Manual Review"]
+VALID_AI_ACTIONS = ["Apply Today", "Strong Consider", "Apply If Time", "Consider", "Low Priority", "Skip", "Manual Review"]
 VALID_AI_REVIEW_SOURCES = ["openai_new", "cache_exact", "cache_similar"]
 LEGACY_VALID_AI_REVIEW_SOURCES = ["api_new", *VALID_AI_REVIEW_SOURCES]
 PENDING_AI_REVIEW_SOURCES = ["", "nan", "none", "rule_based", "manual_pending"]
@@ -312,6 +314,29 @@ def append_usage_rows(usage_path, rows):
     save_table(updated, usage_path, USAGE_LOG_COLUMNS)
 
 
+def is_retryable_openai_error(error):
+    if isinstance(error, (TimeoutError, socket.timeout, URLError)):
+        return True
+    if isinstance(error, HTTPError):
+        return error.code in [408, 429] or 500 <= error.code <= 599
+    return False
+
+
+def upsert_cache_result(cache, cache_row):
+    exact_mask = (
+        cache["canonical_job_key"].astype(str).eq(str(cache_row.get("canonical_job_key", "")))
+        & cache["description_hash"].astype(str).eq(str(cache_row.get("description_hash", "")))
+        & cache["model_used"].astype(str).eq(str(cache_row.get("model_used", "")))
+    )
+    if exact_mask.any():
+        cache_index = cache[exact_mask].index[-1]
+        for column, value in cache_row.items():
+            if column in cache.columns:
+                cache.at[cache_index, column] = value
+        return cache
+    return pd.concat([cache, pd.DataFrame([cache_row])], ignore_index=True)
+
+
 def normalize_file_name(value):
     return str(value or "").strip().lower()
 
@@ -529,9 +554,10 @@ def build_prompt(job, description):
         "Return only valid JSON with these keys: ai_final_action, ai_fit_score, junior_realism, "
         "skill_fit, location_fit, domain_fit, ai_main_reason, ai_red_flags, missing_requirements, "
         "recommended_cv, recommended_cover_letter, cover_letter_angle. "
-        "ai_final_action must be one of Apply Today, Strong Consider, Consider, Low Priority, Skip. "
+        "ai_final_action must be one of Apply Today, Strong Consider, Apply If Time, Consider, Low Priority, Skip, Manual Review. "
         "ai_fit_score must be an integer from 0 to 100. Apply Today normally requires 80+, "
-        "Strong Consider normally requires 70+. If the score and action do not align, use Manual Review. "
+        "Strong Consider normally requires 70+, Apply If Time normally requires 60+, Manual Review is for 50-59 or ambiguity. "
+        "If the score and action do not align, use Manual Review. "
         "Do not give generic reasons. ai_main_reason must be one short, specific sentence based on the job description. "
         "It should mention concrete evidence such as graduate/junior/trainee wording, the exact location or hybrid/remote pattern, "
         "salary realism, Excel/SQL/Power BI/dashboard/reporting/KPI/data quality fit, domain fit or domain risk, "
@@ -620,13 +646,13 @@ def build_batch_prompt(batch_jobs):
         "Review these UK job adverts for Wai Kit Chan. Use the profile, target roles, skip criteria, and scoring guide. "
         "Return exactly one JSON review per input job_id. Do not omit or duplicate any input job. Use this schema: "
         '{"reviews":[{"job_id":"string","canonical_job_key":"string","company":"string","job_title":"string",'
-        '"ai_final_action":"Apply Today | Strong Consider | Consider | Low Priority | Skip","ai_fit_score":0,'
+        '"ai_final_action":"Apply Today | Strong Consider | Apply If Time | Consider | Low Priority | Skip | Manual Review","ai_fit_score":0,'
         '"junior_realism":"High | Medium | Low","skill_fit":"High | Medium | Low","location_fit":"High | Medium | Low",'
         '"domain_fit":"High | Medium | Low","ai_main_reason":"string","ai_red_flags":["string"],'
         '"missing_requirements":["string"],"recommended_cv":"string","recommended_cover_letter":"string",'
         '"cover_letter_angle":"string"}]}. '
         "Use 0-100 scoring only: 90-100 Excellent/Apply Today, 80-89 Very strong/Apply Today or Strong Consider, "
-        "70-79 Good/Strong Consider, 60-69 Borderline/Consider, 40-59 Weak/Low Priority, 0-39 Skip. "
+        "70-79 Good/Strong Consider, 60-69 Borderline/Apply If Time or Consider, 50-59 Manual Review, 0-49 Skip or Low Priority. "
         "Do not use 1-10 scale. ai_main_reason must cite concrete JD evidence such as location/hybrid pattern, salary, "
         "Excel/SQL/Power BI/dashboard/reporting/KPI/data quality, graduate/junior wording, domain risk, or experience risk. "
         "Skip clearly unsuitable contract, training-course, senior, non-data, pure admin/sales, or impossible domain-specific roles.\n\n"
@@ -650,7 +676,7 @@ def normalize_ai_score(result):
     if has_normalized_score:
         score = normalized_score
     elif pd.notna(raw_score) and raw_score <= 10 and (
-        action in ["Apply Today", "Strong Consider", "Consider", "Low Priority"]
+        action in ["Apply Today", "Strong Consider", "Apply If Time", "Consider", "Low Priority"]
     ):
         score = raw_score * 10
     else:
@@ -684,7 +710,8 @@ def clean_ai_result(result, from_cache=False):
         or (from_cache and action == "Manual Review")
         or (action == "Apply Today" and score < 80)
         or (action == "Strong Consider" and score < 70)
-        or (score < 50 and action in ["Apply Today", "Strong Consider"])
+        or (action == "Apply If Time" and score < 60)
+        or (score < 50 and action in ["Apply Today", "Strong Consider", "Apply If Time"])
     )
     if inconsistent:
         action = "Manual Review"
@@ -790,6 +817,8 @@ def apply_ai_batch_reviews(
     verbose=True,
     force_manual_review=False,
     force_files=None,
+    manual_load_summary=None,
+    max_api_calls_per_run_override=None,
 ):
     jobs = ensure_ai_columns(jobs.copy())
     jobs = add_source_priority_columns(jobs)
@@ -804,16 +833,15 @@ def apply_ai_batch_reviews(
         return jobs
 
     api_key = os.environ.get("OPENAI_API_KEY")
-    print(f"OPENAI_API_KEY detected: {'YES' if api_key else 'NO'}")
-    if not api_key:
-        candidate_mask = jobs.apply(is_ai_candidate, axis=1)
-        jobs.loc[candidate_mask, "ai_review_source"] = "skipped_no_key"
-        return jobs
-
     model = cfg("AI_MODEL", "gpt-4o-mini")
     batch_size = int(cfg("AI_BATCH_SIZE", 10))
-    max_jobs = int(cfg("AI_BATCH_MAX_JOBS_PER_RUN", 20))
-    max_calls_per_run = int(cfg("AI_BATCH_MAX_API_CALLS_PER_RUN", 2))
+    max_jobs = int(cfg("AI_BATCH_MAX_JOBS_PER_RUN", 100))
+    max_calls_per_run = (
+        int(max_api_calls_per_run_override)
+        if max_api_calls_per_run_override is not None
+        else int(cfg("AI_BATCH_MAX_API_CALLS_PER_RUN", 10))
+    )
+    max_calls_per_run = max(0, max_calls_per_run)
     max_description_chars = int(cfg("AI_BATCH_MAX_DESCRIPTION_CHARS_PER_JOB", 2500))
     max_daily_api_calls = int(cfg("AI_BATCH_MAX_DAILY_API_CALLS", cfg("AI_REVIEW_MAX_DAILY_API_CALLS", 5)))
     max_daily_jobs = int(cfg("AI_BATCH_MAX_DAILY_JOBS", max_daily_api_calls * batch_size))
@@ -823,12 +851,36 @@ def apply_ai_batch_reviews(
     global_max_monthly_api_calls = int(cfg("AI_GLOBAL_MAX_MONTHLY_API_CALLS", cfg("AI_REVIEW_MAX_MONTHLY_API_CALLS", 100)))
     cache_path = project_path(cfg("AI_REVIEW_CACHE_PATH", "data/ai_review_cache.csv"))
     usage_path = project_path(cfg("AI_REVIEW_USAGE_LOG_PATH", "logs/ai_api_usage_log.csv"))
+    retry_backoffs = [5, 15]
+    batch_status = {
+        "mode": "batch",
+        "attempted": False,
+        "completed": True,
+        "partial": False,
+        "failed": False,
+        "error_type": "",
+        "error_message": "",
+        "jobs_requested": 0,
+        "jobs_successfully_reviewed": 0,
+        "jobs_still_pending": 0,
+        "api_batches_requested": 0,
+        "api_batches_completed": 0,
+        "next_command": "python run_pipeline.py --ai-review-batch",
+    }
+    jobs.attrs["ai_batch_status"] = batch_status
 
     include_api_leads = bool(cfg("AI_BATCH_INCLUDE_API_LEADS", False))
+    manual_load_summary = manual_load_summary or {}
+    manual_raw_files_found = int(manual_load_summary.get("raw_files_found", 0) or 0)
+    manual_raw_files_parsed = int(manual_load_summary.get("raw_files_parsed", 0) or 0)
     manual_candidate_mask = (
         jobs["input_type"].astype(str).str.lower().eq("manual")
         & jobs["hard_skip_reason"].astype(str).str.strip().eq("")
         & ~jobs["previously_seen"].eq(True)
+    )
+    manual_strict_excluded_mask = (
+        jobs["input_type"].astype(str).str.lower().eq("manual")
+        & jobs["hard_skip_reason"].astype(str).str.strip().ne("")
     )
     api_candidate_mask = (
         jobs["input_type"].astype(str).str.lower().eq("api")
@@ -837,6 +889,7 @@ def apply_ai_batch_reviews(
         & ~jobs["previously_seen"].eq(True)
     )
     manual_full_jd_candidates = int(manual_candidate_mask.sum())
+    manual_strict_excluded = int(manual_strict_excluded_mask.sum())
     api_lead_candidates = int(api_candidate_mask.sum())
     manual_valid_ai_result_before_cache = int(
         (manual_candidate_mask & jobs.apply(has_valid_ai_result, axis=1)).sum()
@@ -936,9 +989,17 @@ def apply_ai_batch_reviews(
     manual_blocked_by_limit = max(0, len(manual_pending) - len(manual_pending_to_review))
     cache_invalid_sent_to_api = sum(1 for item in pending_to_review if len(item) > 4 and item[4] == "cache_invalid")
     cache_invalid_requeued = max(0, cache_invalid_rows - cache_invalid_sent_to_api)
+    batch_status["jobs_requested"] = len(pending_to_review)
+    batch_status["jobs_still_pending"] = len(pending)
+    batch_status["api_batches_requested"] = len(batches)
+    jobs.attrs["ai_batch_status"] = batch_status
 
     print("AI batch review preflight:")
-    print(f"Manual full JD candidates: {manual_full_jd_candidates}")
+    print(f"OPENAI_API_KEY detected: {'YES' if api_key else 'NO'}")
+    print(f"Manual raw job files found: {manual_raw_files_found}")
+    print(f"Manual raw job files parsed: {manual_raw_files_parsed}")
+    print(f"Manual jobs strict excluded before AI: {manual_strict_excluded}")
+    print(f"Manual jobs eligible for AI review: {manual_full_jd_candidates}")
     print(f"Manual jobs with valid AI result: {manual_valid_ai_result_before_cache + manual_cache_hits}")
     print(f"Manual jobs pending AI review: {len(manual_pending)}")
     print(f"Manual jobs needing AI review this run: {len(manual_pending_to_review)}")
@@ -954,6 +1015,13 @@ def apply_ai_batch_reviews(
     print(f"Batch API calls allowed this run: {max_calls_allowed}")
     print(f"Model used: {model}")
 
+    if not api_key:
+        print("AI batch review skipped because OPENAI_API_KEY is not set; cached rows were still applied where available.")
+        skipped_indexes = [item[0] for item in pending]
+        jobs.loc[jobs.index.isin(skipped_indexes) & jobs["ai_review_source"].eq("rule_based"), "ai_review_source"] = "skipped_no_key"
+        save_table(cache, cache_path, CACHE_COLUMNS)
+        return jobs
+
     if not batches:
         save_table(cache, cache_path, CACHE_COLUMNS)
         return jobs
@@ -967,6 +1035,8 @@ def apply_ai_batch_reviews(
             save_table(cache, cache_path, CACHE_COLUMNS)
             return jobs
 
+    reviewed_row_indexes = set()
+    failed_error = None
     for batch_number, batch in enumerate(batches, start=1):
         batch_id = f"{get_local_now().strftime('%Y%m%d%H%M%S')}_{batch_number}"
         batch_payload = []
@@ -980,16 +1050,66 @@ def apply_ai_batch_reviews(
             batch_lookup[str(payload["job_id"])] = (row_index, job_key, desc_hash, description)
             batch_lookup[job_key] = (row_index, job_key, desc_hash, description)
         prompt = build_batch_prompt(batch_payload)
-        try:
-            response, tokens_used = call_openai_with_usage(api_key, model, prompt)
-        except HTTPError as error:
-            if error.code == 401:
-                print("OpenAI API authentication failed. Check OPENAI_API_KEY, project permissions, billing, and model access.")
+        response = None
+        tokens_used = ""
+        for attempt_number in range(1, len(retry_backoffs) + 2):
+            try:
+                batch_status["attempted"] = True
+                response, tokens_used = call_openai_with_usage(api_key, model, prompt)
                 break
-            print(f"AI batch review failed: {error}")
-            break
-        except (URLError, TimeoutError, json.JSONDecodeError, KeyError) as error:
-            print(f"AI batch review failed: {error}")
+            except HTTPError as error:
+                if error.code == 401:
+                    print("OpenAI API authentication failed. Check OPENAI_API_KEY, project permissions, billing, and model access.")
+                    failed_error = error
+                    break
+                if is_retryable_openai_error(error) and attempt_number <= len(retry_backoffs):
+                    backoff_seconds = retry_backoffs[attempt_number - 1]
+                    print(f"AI batch review attempt {attempt_number} failed: {error}. Retrying in {backoff_seconds} seconds...")
+                    time.sleep(backoff_seconds)
+                    continue
+                failed_error = error
+                break
+            except (URLError, TimeoutError, socket.timeout) as error:
+                if is_retryable_openai_error(error) and attempt_number <= len(retry_backoffs):
+                    backoff_seconds = retry_backoffs[attempt_number - 1]
+                    print(f"AI batch review attempt {attempt_number} failed: {error}. Retrying in {backoff_seconds} seconds...")
+                    time.sleep(backoff_seconds)
+                    continue
+                failed_error = error
+                break
+            except (json.JSONDecodeError, KeyError) as error:
+                failed_error = error
+                break
+
+        if response is None:
+            error_type = type(failed_error).__name__ if failed_error else "UnknownError"
+            error_message = str(failed_error or "AI batch review failed")
+            print(f"AI batch review failed: {error_message}")
+            batch_status["completed"] = False
+            batch_status["partial"] = True
+            batch_status["failed"] = True
+            batch_status["error_type"] = error_type
+            batch_status["error_message"] = error_message
+            usage_rows.append(
+                {
+                    "run_datetime": now,
+                    "mode": "batch",
+                    "batch_id": batch_id,
+                    "batch_size": len(batch),
+                    "canonical_job_key": "",
+                    "company": "",
+                    "job_title": "",
+                    "model_used": model,
+                    "ai_review_source": "",
+                    "input_chars": len(prompt),
+                    "description_chars": "",
+                    "api_call_made": True,
+                    "api_call_success": False,
+                    "error_type": error_type,
+                    "error_message": error_message,
+                    "tokens_used_if_available": "",
+                }
+            )
             break
 
         reviews = response.get("reviews", [])
@@ -1009,6 +1129,7 @@ def apply_ai_batch_reviews(
             result = clean_ai_result(review, from_cache=False)
             apply_review_result(jobs, row_index, result)
             propagate_review_to_duplicates(jobs, row_index, result, "cache_similar")
+            reviewed_row_indexes.add(row_index)
             cache_row = {
                 "canonical_job_key": job_key,
                 "description_hash": desc_hash,
@@ -1020,7 +1141,7 @@ def apply_ai_batch_reviews(
                 "model_used": model,
                 **result,
             }
-            cache = pd.concat([cache, pd.DataFrame([cache_row])], ignore_index=True)
+            cache = upsert_cache_result(cache, cache_row)
             usage_rows.append(
                 {
                     "run_datetime": now,
@@ -1044,9 +1165,25 @@ def apply_ai_batch_reviews(
         missing_reviews = sorted(expected_row_indexes - seen_row_indexes)
         if missing_reviews:
             print(f"AI batch review missing {len(missing_reviews)} job review(s); leaving them in the AI review queue.")
+            batch_status["partial"] = True
+        batch_status["api_batches_completed"] += 1
 
     save_table(cache, cache_path, CACHE_COLUMNS)
     append_usage_rows(usage_path, usage_rows)
+    still_pending_indexes = [
+        item[0]
+        for item in pending
+        if not has_valid_ai_result(jobs.loc[item[0]])
+    ]
+    batch_status["jobs_successfully_reviewed"] = len(reviewed_row_indexes)
+    batch_status["jobs_still_pending"] = len(still_pending_indexes)
+    if batch_status["failed"] or batch_status["partial"]:
+        print("WARNING: AI batch review did not complete. Outputs may be partial.")
+        print(f"jobs requested for AI review: {batch_status['jobs_requested']}")
+        print(f"jobs successfully reviewed if known: {batch_status['jobs_successfully_reviewed']}")
+        print(f"jobs still pending AI review: {batch_status['jobs_still_pending']}")
+        print(f"next command to rerun: {batch_status['next_command']}")
+    jobs.attrs["ai_batch_status"] = batch_status
     return jobs
 
 
