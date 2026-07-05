@@ -82,6 +82,12 @@ Then run:
 python run_pipeline.py --ai-review-batch
 ```
 
+For manual-only AI review, skip Reed/Adzuna collection:
+
+```powershell
+python run_pipeline.py --ai-review-batch --force-today --skip-api
+```
+
 ### C. After Applying
 
 ```powershell
@@ -101,6 +107,8 @@ Warning: `--no-ai-review` is diagnostic only. It should not be treated as the da
 - API jobs from Reed and Adzuna are discovery leads only.
 - API jobs are saved into `jobs/api_jobs.csv` and `output/api_leads.xlsx`.
 - API jobs should not consume AI review capacity when `AI_BATCH_INCLUDE_API_LEADS=False`.
+- `--skip-api` skips Reed/Adzuna collection entirely and uses the existing `jobs/api_jobs.csv` if present. If it is missing, the pipeline continues with manual raw jobs only.
+- If Reed/Adzuna returns HTTP 503 or another transient API error, the pipeline warns and continues with available data. Existing `jobs/api_jobs.csv` should be preserved when no new API jobs are collected.
 - Manual full JD files in `jobs/raw_jobs/` are the main source for AI review and are assumed to have already been human-screened by the user.
 - Active manual AI review scans `jobs/raw_jobs/*.txt` only. It does not scan `jobs/applied_jobs/`, `jobs/rejected_jobs/`, or `jobs/archived_jobs/` by default.
 - Manual jobs should normally reach AI review unless there is an exact tracker exclusion, a parse failure/empty unreadable file, an exact duplicate raw file, a contract/FTC/temp/day-rate role when permanent-only is preferred, a senior leadership title, a clearly non-target role, or an already valid cached AI result.
@@ -209,6 +217,8 @@ output/manual_pre_ai_exclusion_audit.xlsx
 - `all_ranked_jobs.xlsx`: full audit file.
 - `manual_ai_coverage_audit.xlsx`: one-row-per-manual-file AI coverage audit.
 - `manual_pre_ai_exclusion_audit.xlsx`: strict pre-AI exclusion audit for manual files.
+- `pipeline_debug_audit.xlsx`: multi-sheet debug workbook reconciling manual jobs, ranked output inclusion, AI review queue inclusion, and tracker exclusions.
+- `repost_tracker_audit.xlsx`: audit of exact/similar tracker matches and possible repost handling.
 
 `final_action` meanings:
 
@@ -229,7 +239,7 @@ Manual full JD jobs use AI fit score thresholds after cache/OpenAI review:
 - `Manual Review`: `50 <= ai_fit_score < 60`
 - `Skip`: `ai_fit_score < 50`
 
-`ranked_jobs.xlsx` includes manual jobs with `Apply Today`, `Strong Consider`, and `Apply If Time` when they have a valid AI decision and are not blocked by a clear exclusion such as exact tracker match, hard skip, invalid AI/cache inconsistency, or deduplication.
+`ranked_jobs.xlsx` includes manual jobs with `Apply Today`, `Strong Consider`, and `Apply If Time` when they have a valid AI decision and are not blocked by a clear exclusion such as exact tracker match, hard skip, invalid AI/cache inconsistency, or deduplication. The terminal summary separates overall action counts, which may include API leads, from manual ranked-action counts, which should reconcile with `ranked_jobs.xlsx` plus `ranked_jobs_exclusion_audit.xlsx`.
 
 Manual raw jobs are human-screened before being added, so rule-based filters should be minimal before AI review. AI should decide whether stretch-but-relevant manual jobs become `Apply Today`, `Strong Consider`, `Apply If Time`, `Manual Review`, `Low Priority`, or `Skip`.
 
@@ -245,9 +255,27 @@ Timeout or network failures are retried twice with short backoff. If batch AI st
 python run_pipeline.py --ai-review-batch
 ```
 
+Force re-review options:
+
+- `--force-today`: re-run OpenAI only for eligible manual raw job `.txt` files in `jobs/raw_jobs/` whose modified date is today. This ignores the AI cache for those files only and keeps normal cache behavior for all other manual jobs.
+- `--force-files "file1.txt,file2.txt"`: re-run OpenAI only for specific named raw files.
+- `--force-manual-review`: re-run OpenAI for all eligible manual raw jobs.
+
+Do not combine these force options. `--force-today` is useful after adding or editing several raw job files on the same day:
+
+```powershell
+python run_pipeline.py --ai-review-batch --force-today
+```
+
+Recommended manual-only command when re-reviewing today's raw jobs and avoiding Reed/Adzuna delays:
+
+```powershell
+python run_pipeline.py --ai-review-batch --force-today --skip-api
+```
+
 API leads remain discovery-only in `api_leads.xlsx` unless the full JD is manually added to `jobs/raw_jobs/`.
 
-`ai_review_queue.xlsx` keeps manual jobs needing attention, including `Manual Review`, `Pending AI Review`, `Needs investigation`, suspicious parse cases, contradictory AI results, and similar rejected/applied history that needs human review. A manual row logged as `not sent to ai_review_queue` may already have a valid AI result; it does not mean the job was skipped or missed by AI.
+`ai_review_queue.xlsx` keeps manual jobs needing attention, including `Manual Review`, `Pending AI Review`, `Needs investigation`, suspicious parse cases, contradictory AI results, and similar rejected/applied/interview history that needs human review. It should not include `Apply Today`, `Strong Consider`, or `Apply If Time` only because of generic salary/experience review notes. A manual row logged as `not sent to ai_review_queue` may already have a valid AI result; it does not mean the job was skipped or missed by AI.
 
 ## Tracker Logic
 
@@ -258,9 +286,10 @@ API leads remain discovery-only in `api_leads.xlsx` unless the full JD is manual
 - Exact tracker matches should prevent duplicate applications.
 - Similar rejected, applied, assessment, interview, final interview, or offer history should not automatically exclude new reposts. It should flag the row for review.
 - Same company by itself must never be treated as a duplicate. The same company can have multiple different jobs.
-- Exact duplicate matching should use `apply_link` or job id when available. Without those, exact matching must require strong evidence such as company, job title, location, and description hash.
+- Exact duplicate matching should use strong evidence: same `apply_link`, same external job id, same canonical/requisition id, or same company, job title, location, and description hash.
 - Same company and same title with a different apply link, job id, posted date, or description should be treated as a possible repost/new vacancy and allowed through review.
 - Previously rejected similar jobs should be flagged with tracker/repost fields, not automatically blocked.
+- If a manual job is excluded by tracker without strong exact evidence, print `WARNING: Possible repost excluded. Check output/repost_tracker_audit.xlsx.` and review `repost_tracker_audit.xlsx`.
 
 Repost/audit fields include:
 
@@ -367,3 +396,12 @@ Before modifying code:
 - Added CORD (`cord.co`) source detection for manually pasted raw jobs and CORD URL job id extraction for safer duplicate/tracker matching.
 - Increased batch OpenAI review capacity from 20 to 100 jobs per run by setting 10 batch calls x 10 jobs, with matching daily batch limits.
 - Added AI batch retry/partial-output warnings, manual coverage rerun guidance, and `--ai-batch-calls` for smaller safer batch runs.
+
+### 2026-07-05
+
+- Added `output/pipeline_debug_audit.xlsx` and `output/repost_tracker_audit.xlsx`.
+- Clarified ranked jobs reconciliation: overall action counts can include API leads; manual ranked-action counts reconcile with `ranked_jobs.xlsx`.
+- Tightened AI review queue rules so generic salary/experience `needs_human_review` does not place otherwise actionable jobs into `ai_review_queue.xlsx`.
+- Added a stronger guard around manual tracker exact exclusions so same company/title alone is treated as possible repost rather than automatic exclusion.
+- Added `--force-today` for batch OpenAI re-review of eligible manual raw job files modified today.
+- Added `--skip-api` so manual AI review can run without Reed/Adzuna API collection, and made API HTTP 503 handling preserve existing API jobs.

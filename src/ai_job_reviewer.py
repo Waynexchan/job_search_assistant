@@ -351,10 +351,13 @@ def parse_force_files(force_files):
     return {normalize_file_name(file_name) for file_name in raw_files if normalize_file_name(file_name)}
 
 
-def should_force_manual_review(job, force_manual_review=False, force_files=None):
+def should_force_manual_review(job, force_manual_review=False, force_files=None, force_today_files=None):
     if str(job.get("input_type", "")).lower() != "manual":
         return False
     file_name = normalize_file_name(job.get("file_name", ""))
+    force_today_file_set = parse_force_files(force_today_files)
+    if force_today_file_set:
+        return file_name in force_today_file_set
     force_file_set = parse_force_files(force_files)
     if force_file_set:
         return file_name in force_file_set
@@ -443,7 +446,7 @@ def add_source_priority_columns(jobs):
     return jobs
 
 
-def get_ai_candidate_indexes(jobs, max_jobs, force_manual_review=False, force_files=None):
+def get_ai_candidate_indexes(jobs, max_jobs, force_manual_review=False, force_files=None, force_today_files=None):
     candidates = jobs[jobs.apply(is_ai_candidate, axis=1)].copy()
     if candidates.empty:
         return []
@@ -460,7 +463,7 @@ def get_ai_candidate_indexes(jobs, max_jobs, force_manual_review=False, force_fi
     candidates["computed_ai_review_priority_score"] = candidates.apply(calculate_candidate_priority_score, axis=1)
     candidates["date_added_sort"] = pd.to_datetime(candidates["date_added"], errors="coerce").fillna(pd.Timestamp.min)
     candidates["forced_manual_review_sort"] = candidates.apply(
-        lambda job: 1 if should_force_manual_review(job, force_manual_review, force_files) else 0,
+        lambda job: 1 if should_force_manual_review(job, force_manual_review, force_files, force_today_files) else 0,
         axis=1,
     )
     manual_candidates = candidates[candidates["input_type"].astype(str).str.lower().eq("manual")]
@@ -483,6 +486,41 @@ def get_ai_candidate_indexes(jobs, max_jobs, force_manual_review=False, force_fi
     if max_jobs is None:
         return list(candidates.index)
     return list(candidates.index[:max_jobs])
+
+
+def build_force_today_summary(jobs, force_today_files):
+    rows_by_file = {
+        normalize_file_name(row.get("file_name", "")): row
+        for _, row in jobs[jobs["input_type"].astype(str).str.lower().eq("manual")].iterrows()
+    }
+    eligible = []
+    skipped = []
+    for raw_file_name in sorted(force_today_files or []):
+        normalized_name = normalize_file_name(raw_file_name)
+        job = rows_by_file.get(normalized_name)
+        if job is None:
+            skipped.append((raw_file_name, "file was not parsed into a manual job row"))
+            continue
+        if is_ai_candidate(job):
+            eligible.append(raw_file_name)
+            continue
+        reason = ""
+        if str(job.get("hard_skip_reason", "")).strip():
+            reason = str(job.get("hard_skip_reason", "")).strip()
+        elif bool(job.get("previously_seen", False)):
+            reason = str(job.get("tracker_overlay_reason", "")).strip() or "exact tracker exclusion"
+        elif str(job.get("status", "new")).lower() not in ["", "new", "shortlisted"]:
+            reason = f"status is {job.get('status', '')}"
+        elif str(job.get("pre_ai_bucket", "")) not in ["ai_review_candidate", "rule_apply_today", "rule_strong_consider"]:
+            reason = f"pre_ai_bucket is {job.get('pre_ai_bucket', '') or 'blank'}"
+        else:
+            reason = "not eligible for AI review"
+        skipped.append((raw_file_name, reason))
+    return {
+        "files": sorted(force_today_files),
+        "eligible": eligible,
+        "skipped": skipped,
+    }
 
 
 def calculate_candidate_priority_score(job):
@@ -817,6 +855,7 @@ def apply_ai_batch_reviews(
     verbose=True,
     force_manual_review=False,
     force_files=None,
+    force_today_files=None,
     manual_load_summary=None,
     max_api_calls_per_run_override=None,
 ):
@@ -894,7 +933,10 @@ def apply_ai_batch_reviews(
     manual_valid_ai_result_before_cache = int(
         (manual_candidate_mask & jobs.apply(has_valid_ai_result, axis=1)).sum()
     )
-    candidate_indexes = get_ai_candidate_indexes(jobs, None, force_manual_review, force_files)
+    force_today_active = force_today_files is not None
+    force_today_files = sorted(force_today_files or [])
+    force_today_summary = build_force_today_summary(jobs, force_today_files) if force_today_active else None
+    candidate_indexes = get_ai_candidate_indexes(jobs, None, force_manual_review, force_files, force_today_files)
     cache = read_table(cache_path, CACHE_COLUMNS)
     usage_log = read_table(usage_path, USAGE_LOG_COLUMNS)
     usage_rows = []
@@ -916,7 +958,7 @@ def apply_ai_batch_reviews(
         desc_hash = get_description_hash(description)
         cache_match = pd.DataFrame()
         cache_source = "cache_exact"
-        force_this_job = should_force_manual_review(job, force_manual_review, force_files)
+        force_this_job = should_force_manual_review(job, force_manual_review, force_files, force_today_files)
         if not cache.empty and not force_this_job:
             cache_match = cache[
                 (cache["canonical_job_key"] == job_key)
@@ -928,7 +970,8 @@ def apply_ai_batch_reviews(
                 cache_source = "cache_similar"
         if force_this_job:
             forced_manual_requeued += 1
-            pending.append((row_index, job_key, desc_hash, description, "force_manual_review"))
+            force_reason = "force_today" if parse_force_files(force_today_files) else "force_manual_review"
+            pending.append((row_index, job_key, desc_hash, description, force_reason))
         elif not cache_match.empty:
             cache_row_index = cache_match.index[-1]
             cached_result = clean_ai_result(cache.loc[cache_row_index].to_dict(), from_cache=True)
@@ -1007,6 +1050,16 @@ def apply_ai_batch_reviews(
     if manual_blocked_by_limit:
         print(f"Manual jobs remaining pending after this run: {manual_blocked_by_limit}")
     print(f"Manual jobs force re-review: {forced_manual_requeued}")
+    if force_today_summary:
+        print(f"Manual raw files modified today: {len(force_today_summary['files'])}")
+        print(f"Today files eligible for force review: {len(force_today_summary['eligible'])}")
+        if force_today_summary["eligible"]:
+            print("Today force review files:")
+            for file_name in force_today_summary["eligible"]:
+                print(f"- {file_name}")
+        print(f"Today files skipped with reason: {len(force_today_summary['skipped'])}")
+        for file_name, reason in force_today_summary["skipped"]:
+            print(f"- {file_name}: {reason}")
     print(f"API lead candidates: {api_lead_candidates}")
     print(f"AI_BATCH_INCLUDE_API_LEADS: {include_api_leads}")
     print(f"Valid cache hits: {cache_hits}")

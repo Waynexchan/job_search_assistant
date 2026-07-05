@@ -80,6 +80,16 @@ def fetch_json(url, headers=None):
         return json.loads(response.read().decode("utf-8"))
 
 
+def print_api_request_warning(source, search_term, location, error):
+    if isinstance(error, HTTPError) and error.code == 503:
+        print(
+            f"WARNING: {source} returned HTTP 503 Service Temporarily Unavailable "
+            f"for {search_term} / {location}. Continuing with other sources."
+        )
+        return
+    print(f"WARNING: {source} request failed for {search_term} / {location}: {error}")
+
+
 def make_salary(minimum, maximum):
     """Format salary fields from API responses."""
     if pd.isna(minimum) and pd.isna(maximum):
@@ -118,7 +128,7 @@ def collect_adzuna_jobs(app_id, api_key):
             try:
                 data = fetch_json(url)
             except (HTTPError, URLError, TimeoutError) as error:
-                print(f"Adzuna request failed for {search_term} / {location}: {error}")
+                print_api_request_warning("Adzuna", search_term, location, error)
                 continue
 
             for job in data.get("results", []):
@@ -165,7 +175,7 @@ def collect_reed_jobs(api_key):
             try:
                 data = fetch_json(url, headers=headers)
             except (HTTPError, URLError, TimeoutError) as error:
-                print(f"Reed request failed for {search_term} / {location}: {error}")
+                print_api_request_warning("Reed", search_term, location, error)
                 continue
 
             for job in data.get("results", []):
@@ -235,6 +245,15 @@ def collect_api_jobs():
     existing_jobs = load_existing_api_jobs()
     existing_count = len(deduplicate_jobs(existing_jobs))
     new_jobs = pd.DataFrame(new_rows, columns=API_COLUMNS)
+    if new_jobs.empty and API_JOBS_FILE.exists():
+        existing_deduped = deduplicate_jobs(existing_jobs)
+        print(f"Total Adzuna jobs collected: {len(adzuna_rows)}")
+        print(f"Total Reed jobs collected: {len(reed_rows)}")
+        print("Total API jobs collected this run: 0")
+        print("No new API jobs collected. Preserving existing jobs/api_jobs.csv.")
+        print(f"Using {len(existing_deduped)} existing deduplicated API jobs from: {API_JOBS_FILE}")
+        return existing_deduped
+
     merged_jobs = deduplicate_jobs(pd.concat([existing_jobs, new_jobs], ignore_index=True))
     new_jobs_added = len(merged_jobs) - existing_count
 

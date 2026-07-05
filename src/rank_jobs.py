@@ -36,6 +36,8 @@ AI_REVIEW_QUEUE_FILE = PROJECT_ROOT / "output" / "ai_review_queue.xlsx"
 MANUAL_AI_COVERAGE_AUDIT_FILE = PROJECT_ROOT / "output" / "manual_ai_coverage_audit.xlsx"
 MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE = PROJECT_ROOT / "output" / "manual_pre_ai_exclusion_audit.xlsx"
 RANKED_JOBS_EXCLUSION_AUDIT_FILE = PROJECT_ROOT / "output" / "ranked_jobs_exclusion_audit.xlsx"
+PIPELINE_DEBUG_AUDIT_FILE = PROJECT_ROOT / "output" / "pipeline_debug_audit.xlsx"
+REPOST_TRACKER_AUDIT_FILE = PROJECT_ROOT / "output" / "repost_tracker_audit.xlsx"
 API_LEADS_FILE = PROJECT_ROOT / "output" / "api_leads.xlsx"
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
 TRACKER_HISTORY_FILE = PROJECT_ROOT / "tracker" / "applications_history.xlsx"
@@ -932,6 +934,15 @@ def load_raw_jobs():
     return raw_jobs
 
 
+def get_raw_job_files_modified_today():
+    today = date.today()
+    return {
+        raw_file.name
+        for raw_file in RAW_JOBS_DIR.glob("*.txt")
+        if datetime.fromtimestamp(raw_file.stat().st_mtime).date() == today
+    }
+
+
 def load_api_jobs():
     """Read jobs collected from APIs and prepare them for ranking."""
     if not API_JOBS_FILE.exists():
@@ -1490,7 +1501,7 @@ def get_manual_pre_ai_exclusion(job):
         return "Empty or unreadable", "manual txt file is empty or unreadable"
     if bool(job.get("manual_duplicate", False)):
         return "Exact duplicate", "exact duplicate of another manual raw job"
-    if bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False)):
+    if bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False)) and has_strong_exact_tracker_evidence(job):
         status = standardise_status(job.get("status", ""))
         return "Exact tracker exclusion", f"exact tracker match already exists as {status or 'existing tracker row'}"
     if is_contract_or_temporary_role(job):
@@ -1518,9 +1529,18 @@ def get_hard_skip_reason(job):
 
     if status in ["expired", "closed"]:
         return "job is expired or closed"
+    if (
+        is_manual_job(job)
+        and status in ["applied", "assessment", "interview", "final_interview", "offer", "rejected", "withdrawn", "not_interested", "skip"]
+        and bool(job.get("tracker_exact_match", False))
+        and not has_strong_exact_tracker_evidence(job)
+    ):
+        return ""
     if status in ["applied", "assessment", "interview", "final_interview", "offer", "rejected", "withdrawn", "not_interested", "skip"]:
         return f"already exists in tracker as {status}"
     if bool(job.get("previously_seen", False)):
+        if is_manual_job(job) and bool(job.get("tracker_exact_match", False)) and not has_strong_exact_tracker_evidence(job):
+            return ""
         return str(job.get("tracker_exclusion_reason", "")) or "already exists in tracker"
     if is_manual_job(job):
         if not str(job.get("job_text", "")).strip():
@@ -2981,6 +3001,380 @@ def build_ranked_jobs_exclusion_audit(ranked_jobs, shown_ranked_jobs, deduped_ra
     return pd.DataFrame(audit_rows, columns=columns)
 
 
+def classify_tracker_match_type(reason, status_source=""):
+    reason_text = str(reason or "").lower()
+    if "apply_link" in reason_text:
+        return "exact_apply_link"
+    if "external job id" in reason_text:
+        return "exact_external_job_id"
+    if "canonical job_id" in reason_text:
+        return "exact_canonical_job_id"
+    if "description hash" in reason_text:
+        return "exact_description_hash"
+    if str(status_source or "") == "tracker_similarity":
+        return "similar_tracker_match"
+    if reason_text:
+        return "exact_other"
+    return ""
+
+
+def has_strong_exact_tracker_evidence(job):
+    return classify_tracker_match_type(job.get("tracker_overlay_reason", ""), job.get("status_source", "")) in [
+        "exact_apply_link",
+        "exact_external_job_id",
+        "exact_canonical_job_id",
+        "exact_description_hash",
+    ]
+
+
+def find_matched_tracker_row(job, tracker, aliases):
+    if tracker.empty:
+        return {}
+    matched_job_id = str(job.get("matched_tracker_job_id", "")).strip()
+    if matched_job_id and "job_id" in tracker.columns:
+        matches = tracker[tracker["job_id"].astype(str).str.strip().eq(matched_job_id)]
+        if not matches.empty:
+            return matches.iloc[0].to_dict()
+    for _, row in tracker.iterrows():
+        if row_exact_match_reason(job, row, aliases):
+            return row.to_dict()
+    similar = tracker[tracker_similarity_mask(job, tracker, aliases)]
+    if not similar.empty:
+        return similar.iloc[0].to_dict()
+    return {}
+
+
+def get_external_job_id_text(job):
+    return "; ".join(sorted(extract_url_job_identifiers(job.get("apply_link", ""))))
+
+
+def get_ai_review_queue_reason(job, manual_needs_ai_review=False):
+    if manual_needs_ai_review:
+        return "pending AI review"
+    if str(job.get("final_action", "")) == "Pending AI Review":
+        return "final_action is Pending AI Review"
+    if str(job.get("final_action", "")) == "Manual Review":
+        return "final_action is Manual Review"
+    if str(job.get("ai_final_action", "")) == "Manual Review":
+        return "AI returned Manual Review"
+    if str(job.get("ai_review_source", "")) == "cache_invalid":
+        return "AI cache invalid"
+    if str(job.get("human_review_reason", "")) == "AI score/action inconsistency":
+        return "AI score/action inconsistency"
+    if str(job.get("manual_parse_confidence", "")) == "Low":
+        return "suspicious parser case"
+    if bool(job.get("previously_rejected_similar", False)):
+        return "similar rejected tracker history"
+    if bool(job.get("tracker_similarity_match", False)):
+        return "similar applied/interview tracker history"
+    if bool(job.get("repost_candidate", False)):
+        return "possible repost candidate"
+    if is_api_job(job):
+        return "API lead candidate"
+    return ""
+
+
+def should_be_in_ai_review_queue(job, manual_needs_ai_review=False):
+    if str(job.get("hard_skip_reason", "")).strip():
+        return False
+    if is_api_job(job):
+        if not bool(cfg("AI_BATCH_INCLUDE_API_LEADS", False)):
+            return False
+        return get_api_lead_next_action(job) in ["Open link and copy full JD", "Low priority"]
+    if not is_manual_job(job):
+        return False
+    return bool(get_ai_review_queue_reason(job, manual_needs_ai_review))
+
+
+def build_repost_tracker_audit(manual_rows):
+    columns = [
+        "file_name",
+        "parsed_company",
+        "parsed_job_title",
+        "parsed_location",
+        "apply_link",
+        "external_job_id",
+        "posted_date",
+        "description_hash",
+        "matched_tracker_company",
+        "matched_tracker_job_title",
+        "matched_tracker_status",
+        "matched_tracker_apply_link",
+        "matched_tracker_date",
+        "tracker_match_type",
+        "is_exact_tracker_match",
+        "is_similar_tracker_match",
+        "is_repost_candidate",
+        "excluded_from_ai",
+        "exclusion_reason",
+        "recommended_action",
+    ]
+    tracker = load_applications_tracker()
+    aliases = load_company_aliases()
+    rows = []
+    for _, job in manual_rows.sort_values(by=["file_name"]).iterrows():
+        if not (bool(job.get("tracker_exact_match", False)) or bool(job.get("tracker_similarity_match", False)) or bool(job.get("repost_candidate", False))):
+            continue
+        tracker_row = find_matched_tracker_row(job, tracker, aliases)
+        match_type = classify_tracker_match_type(job.get("tracker_overlay_reason", ""), job.get("status_source", ""))
+        is_exact = bool(job.get("tracker_exact_match", False)) and has_strong_exact_tracker_evidence(job)
+        excluded_from_ai = bool(job.get("previously_seen", False)) or bool(job.get("hard_skip_reason", ""))
+        possible_repost = bool(job.get("tracker_similarity_match", False)) or bool(job.get("repost_candidate", False)) or (
+            bool(job.get("tracker_exact_match", False)) and not is_exact
+        )
+        if is_exact and excluded_from_ai:
+            recommended_action = "keep excluded; exact tracker evidence found"
+        elif possible_repost:
+            recommended_action = "treat as possible repost; keep for AI/manual review"
+        else:
+            recommended_action = "review tracker match"
+        rows.append(
+            {
+                "file_name": job.get("file_name", ""),
+                "parsed_company": job.get("company", ""),
+                "parsed_job_title": job.get("job_title", ""),
+                "parsed_location": job.get("location", ""),
+                "apply_link": job.get("apply_link", ""),
+                "external_job_id": get_external_job_id_text(job),
+                "posted_date": job.get("job_posted_date", ""),
+                "description_hash": get_description_hash_for_match(job),
+                "matched_tracker_company": tracker_row.get("company", ""),
+                "matched_tracker_job_title": tracker_row.get("job_title", ""),
+                "matched_tracker_status": standardise_status(tracker_row.get("current_status", "")),
+                "matched_tracker_apply_link": tracker_row.get("apply_link", ""),
+                "matched_tracker_date": get_tracker_reference_date(tracker_row),
+                "tracker_match_type": match_type,
+                "is_exact_tracker_match": is_exact,
+                "is_similar_tracker_match": bool(job.get("tracker_similarity_match", False)),
+                "is_repost_candidate": possible_repost,
+                "excluded_from_ai": excluded_from_ai,
+                "exclusion_reason": job.get("tracker_overlay_reason", "") or job.get("hard_skip_reason", ""),
+                "recommended_action": recommended_action,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_pipeline_debug_audit(
+    manual_rows,
+    shown_ranked_jobs,
+    ai_review_queue,
+    manual_ai_coverage_audit,
+    ranked_jobs_exclusion_audit,
+    allowed_daily_actions,
+):
+    manual_jobs_columns = [
+        "file_name",
+        "input_type",
+        "job_title",
+        "company",
+        "location",
+        "final_action",
+        "ai_final_action",
+        "ai_fit_score",
+        "ai_review_source",
+        "next_action",
+        "included_in_ranked_jobs",
+        "included_in_ai_review_queue",
+        "strict_excluded_before_ai",
+        "strict_exclusion_reason",
+        "tracker_exact_match",
+        "tracker_match_type",
+        "tracker_overlay_reason",
+        "duplicate_reason",
+        "coverage_status",
+        "recommended_debug_action",
+    ]
+    ranked_check_columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "final_action",
+        "ai_fit_score",
+        "should_be_in_ranked_jobs",
+        "actually_in_ranked_jobs",
+        "exclusion_reason",
+        "investigation_note",
+    ]
+    queue_check_columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "final_action",
+        "ai_fit_score",
+        "ai_review_source",
+        "next_action",
+        "reason_in_queue",
+        "should_be_in_queue",
+        "investigation_note",
+    ]
+    tracker_check_columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "apply_link",
+        "external_job_id",
+        "description_hash",
+        "matched_tracker_company",
+        "matched_tracker_job_title",
+        "matched_tracker_status",
+        "matched_tracker_apply_link",
+        "matched_tracker_job_id",
+        "matched_tracker_description_hash",
+        "tracker_match_type",
+        "is_exact_tracker_match",
+        "is_possible_repost",
+        "excluded_from_ai",
+        "exclusion_reason",
+        "recommended_action",
+    ]
+    included_ranked_files = set(shown_ranked_jobs["file_name"].astype(str)) if "file_name" in shown_ranked_jobs.columns else set()
+    included_queue_files = set(ai_review_queue["file_name"].astype(str)) if "file_name" in ai_review_queue.columns else set()
+    coverage_by_file = {}
+    if not manual_ai_coverage_audit.empty:
+        coverage_by_file = dict(
+            zip(
+                manual_ai_coverage_audit["file_name"].astype(str),
+                manual_ai_coverage_audit["coverage_status"].astype(str),
+            )
+        )
+    ranked_exclusion_by_file = {}
+    if not ranked_jobs_exclusion_audit.empty:
+        ranked_exclusion_by_file = dict(
+            zip(
+                ranked_jobs_exclusion_audit["file_name"].astype(str),
+                ranked_jobs_exclusion_audit["exclusion_reason"].astype(str),
+            )
+        )
+
+    manual_job_rows = []
+    ranked_check_rows = []
+    tracker_rows = []
+    tracker = load_applications_tracker()
+    aliases = load_company_aliases()
+
+    for _, job in manual_rows.sort_values(by=["file_name"]).iterrows():
+        file_name = str(job.get("file_name", ""))
+        strict_category, strict_reason = get_manual_pre_ai_exclusion(job)
+        in_ranked = file_name in included_ranked_files
+        in_queue = file_name in included_queue_files
+        queue_reason = get_ai_review_queue_reason(job, manual_job_needs_ai_review(job))
+        coverage_status = coverage_by_file.get(file_name, "")
+        tracker_match_type = classify_tracker_match_type(job.get("tracker_overlay_reason", ""), job.get("status_source", ""))
+        if coverage_status == "Pending AI review":
+            debug_action = "rerun AI batch review"
+        elif bool(job.get("tracker_exact_match", False)) and not has_strong_exact_tracker_evidence(job):
+            debug_action = "possible repost; check tracker audit"
+        elif str(job.get("final_action", "")) in allowed_daily_actions and not in_ranked:
+            debug_action = "check ranked_jobs_exclusion_audit"
+        elif in_queue:
+            debug_action = "check ai_review_queue reason"
+        else:
+            debug_action = "no action"
+        duplicate_reason = ""
+        if pd.to_numeric(job.get("duplicate_count", 1), errors="coerce") > 1:
+            duplicate_reason = f"duplicate_count={job.get('duplicate_count', '')}; merged_sources={job.get('merged_sources', '')}"
+        manual_job_rows.append(
+            {
+                "file_name": file_name,
+                "input_type": job.get("input_type", ""),
+                "job_title": job.get("job_title", ""),
+                "company": job.get("company", ""),
+                "location": job.get("location", ""),
+                "final_action": job.get("final_action", ""),
+                "ai_final_action": job.get("ai_final_action", ""),
+                "ai_fit_score": job.get("ai_fit_score", ""),
+                "ai_review_source": job.get("ai_review_source", ""),
+                "next_action": job.get("next_action", ""),
+                "included_in_ranked_jobs": in_ranked,
+                "included_in_ai_review_queue": in_queue,
+                "strict_excluded_before_ai": bool(strict_category),
+                "strict_exclusion_reason": strict_reason,
+                "tracker_exact_match": job.get("tracker_exact_match", ""),
+                "tracker_match_type": tracker_match_type,
+                "tracker_overlay_reason": job.get("tracker_overlay_reason", ""),
+                "duplicate_reason": duplicate_reason,
+                "coverage_status": coverage_status,
+                "recommended_debug_action": debug_action,
+            }
+        )
+        if str(job.get("final_action", "")) in allowed_daily_actions:
+            ranked_check_rows.append(
+                {
+                    "file_name": file_name,
+                    "job_title": job.get("job_title", ""),
+                    "company": job.get("company", ""),
+                    "final_action": job.get("final_action", ""),
+                    "ai_fit_score": job.get("ai_fit_score", ""),
+                    "should_be_in_ranked_jobs": True,
+                    "actually_in_ranked_jobs": in_ranked,
+                    "exclusion_reason": ranked_exclusion_by_file.get(file_name, ""),
+                    "investigation_note": "included" if in_ranked else ranked_exclusion_by_file.get(file_name, "missing from ranked_jobs without audit reason"),
+                }
+            )
+        if bool(job.get("tracker_exact_match", False)) or bool(job.get("tracker_similarity_match", False)) or bool(job.get("previously_seen", False)):
+            tracker_row = find_matched_tracker_row(job, tracker, aliases)
+            is_exact = bool(job.get("tracker_exact_match", False)) and has_strong_exact_tracker_evidence(job)
+            possible_repost = bool(job.get("tracker_similarity_match", False)) or bool(job.get("repost_candidate", False)) or (
+                bool(job.get("tracker_exact_match", False)) and not is_exact
+            )
+            tracker_rows.append(
+                {
+                    "file_name": file_name,
+                    "job_title": job.get("job_title", ""),
+                    "company": job.get("company", ""),
+                    "apply_link": job.get("apply_link", ""),
+                    "external_job_id": get_external_job_id_text(job),
+                    "description_hash": get_description_hash_for_match(job),
+                    "matched_tracker_company": tracker_row.get("company", ""),
+                    "matched_tracker_job_title": tracker_row.get("job_title", ""),
+                    "matched_tracker_status": standardise_status(tracker_row.get("current_status", "")),
+                    "matched_tracker_apply_link": tracker_row.get("apply_link", ""),
+                    "matched_tracker_job_id": tracker_row.get("job_id", ""),
+                    "matched_tracker_description_hash": get_description_hash_for_match(tracker_row) if tracker_row else "",
+                    "tracker_match_type": tracker_match_type,
+                    "is_exact_tracker_match": is_exact,
+                    "is_possible_repost": possible_repost,
+                    "excluded_from_ai": bool(job.get("previously_seen", False)) or bool(job.get("hard_skip_reason", "")),
+                    "exclusion_reason": job.get("tracker_overlay_reason", "") or job.get("hard_skip_reason", ""),
+                    "recommended_action": "keep excluded; exact tracker evidence found" if is_exact else "possible repost; review manually",
+                }
+            )
+
+    queue_rows = []
+    for _, job in ai_review_queue.sort_values(by=["file_name", "job_title"]).iterrows():
+        manual_needs = manual_job_needs_ai_review(job) if is_manual_job(job) else False
+        reason = get_ai_review_queue_reason(job, manual_needs)
+        queue_rows.append(
+            {
+                "file_name": job.get("file_name", ""),
+                "job_title": job.get("job_title", ""),
+                "company": job.get("company", ""),
+                "final_action": job.get("final_action", ""),
+                "ai_fit_score": job.get("ai_fit_score", ""),
+                "ai_review_source": job.get("ai_review_source", ""),
+                "next_action": job.get("next_action", ""),
+                "reason_in_queue": reason or "unknown queue reason",
+                "should_be_in_queue": should_be_in_ai_review_queue(job, manual_needs),
+                "investigation_note": "expected queue row" if reason else "unexpected queue row; check filter logic",
+            }
+        )
+
+    return {
+        "manual_jobs": pd.DataFrame(manual_job_rows, columns=manual_jobs_columns),
+        "ranked_jobs_check": pd.DataFrame(ranked_check_rows, columns=ranked_check_columns),
+        "ai_review_queue_check": pd.DataFrame(queue_rows, columns=queue_check_columns),
+        "tracker_exclusion_check": pd.DataFrame(tracker_rows, columns=tracker_check_columns),
+    }
+
+
+def save_pipeline_debug_audit(path, sheets):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path) as writer:
+        for sheet_name, sheet_df in sheets.items():
+            sheet_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+
 def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=False):
     warnings = []
     source = str(job.get("ai_review_source", "")).strip()
@@ -3020,7 +3414,11 @@ def get_manual_ai_coverage_warning(job, coverage_status, selected_for_ai_queue=F
 
 
 def get_manual_ai_coverage_status(job, parse_failed=False, selected_for_ai_queue=False):
-    tracker_excluded = bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False))
+    tracker_excluded = (
+        bool(job.get("tracker_exact_match", False))
+        and bool(job.get("previously_seen", False))
+        and has_strong_exact_tracker_evidence(job)
+    )
     exclusion_category, _reason = get_manual_pre_ai_exclusion(job)
     ai_reviewed_source_and_score = (
         str(job.get("ai_review_source", "")).strip().lower() in LEGACY_VALID_AI_REVIEW_SOURCES
@@ -3546,7 +3944,7 @@ def apply_repost_candidate_annotations(jobs):
     return jobs
 
 
-def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_calls=None):
+def main(ai_review=None, force_manual_review=False, force_files="", force_today=False, ai_batch_calls=None):
     """Read raw job files, rank the jobs, then save an Excel file."""
     profile = load_profile()
     jobs = load_all_jobs()
@@ -3766,11 +4164,13 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
 
     ai_batch_status = {}
     if ai_review == "batch":
+        force_today_files = sorted(get_raw_job_files_modified_today()) if force_today else None
         ranked_jobs = apply_ai_batch_reviews(
             ranked_jobs,
             enabled=True,
             force_manual_review=force_manual_review,
             force_files=force_files,
+            force_today_files=force_today_files,
             manual_load_summary=manual_load_summary,
             max_api_calls_per_run_override=ai_batch_calls,
         )
@@ -3935,35 +4335,16 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
     manual_queue_candidate = ranked_jobs.apply(is_manual_job, axis=1)
     api_queue_candidate = ranked_jobs.apply(is_api_job, axis=1) & include_api_leads_in_ai_queue
     manual_needs_ai_review_mask = manual_queue_candidate & ranked_jobs.apply(manual_job_needs_ai_review, axis=1)
+    queue_reason_series = ranked_jobs.apply(
+        lambda job: get_ai_review_queue_reason(job, manual_job_needs_ai_review(job) if is_manual_job(job) else False),
+        axis=1,
+    )
     ai_review_queue = ranked_jobs[
         (
-            (
-                ranked_jobs["pre_ai_bucket"].isin(["ai_review_candidate", "rule_apply_today", "rule_strong_consider"])
-                & (manual_queue_candidate | api_queue_candidate)
-            )
-            | (
-                manual_queue_candidate
-                & (
-                    manual_needs_ai_review_mask
-                    | ranked_jobs["ai_review_source"].isin(["", "rule_based", "none", "manual_pending", "skipped_no_key", "skipped_quota", "cache_invalid"])
-                    | ranked_jobs["final_action"].isin(["Pending AI Review", "Manual Review", "Consider"])
-                    | ranked_jobs["ai_final_action"].eq("Manual Review")
-                )
-            )
+            (manual_queue_candidate & queue_reason_series.astype(str).str.strip().ne(""))
             | (
                 api_queue_candidate
                 & ranked_jobs.apply(get_api_lead_next_action, axis=1).isin(["Open link and copy full JD", "Low priority"])
-            )
-        )
-        & (
-            ranked_jobs["ai_review_source"].isin(["", "rule_based", "none", "manual_pending", "skipped_no_key", "skipped_quota"])
-            | ranked_jobs["ai_review_source"].eq("cache_invalid")
-            | ranked_jobs["ai_final_action"].eq("Manual Review")
-            | ranked_jobs["needs_human_review"].eq(True)
-            | manual_needs_ai_review_mask
-            | (
-                manual_queue_candidate
-                & ranked_jobs["final_action"].isin(["Pending AI Review", "Manual Review", "Consider"])
             )
         )
         & (ranked_jobs["hard_skip_reason"].astype(str).str.strip() == "")
@@ -4031,6 +4412,23 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
         if ai_review == "batch"
         else pd.DataFrame()
     )
+    repost_tracker_audit = build_repost_tracker_audit(manual_rows)
+    pipeline_debug_audit = build_pipeline_debug_audit(
+        manual_rows,
+        shown_ranked_jobs,
+        ai_review_queue,
+        manual_ai_coverage_audit,
+        ranked_jobs_exclusion_audit,
+        allowed_daily_actions,
+    )
+    possible_repost_excluded = (
+        repost_tracker_audit[
+            repost_tracker_audit["excluded_from_ai"].eq(True)
+            & repost_tracker_audit["is_exact_tracker_match"].ne(True)
+        ]
+        if not repost_tracker_audit.empty
+        else pd.DataFrame()
+    )
 
     # Create the output folder if it does not already exist.
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -4045,6 +4443,8 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
         ranked_jobs_exclusion_audit.to_excel(RANKED_JOBS_EXCLUSION_AUDIT_FILE, index=False)
         ai_review_queue.to_excel(AI_REVIEW_QUEUE_FILE, index=False)
         api_leads.to_excel(API_LEADS_FILE, index=False)
+        repost_tracker_audit.to_excel(REPOST_TRACKER_AUDIT_FILE, index=False)
+        save_pipeline_debug_audit(PIPELINE_DEBUG_AUDIT_FILE, pipeline_debug_audit)
         if ai_review == "batch":
             manual_ai_coverage_audit.to_excel(MANUAL_AI_COVERAGE_AUDIT_FILE, index=False)
             manual_pre_ai_exclusion_audit.to_excel(MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE, index=False)
@@ -4052,13 +4452,14 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
         print(
             f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, "
             f"{API_LEADS_FILE}, {RANKED_JOBS_EXCLUSION_AUDIT_FILE}, {MANUAL_AI_COVERAGE_AUDIT_FILE}, "
-            f"or {MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}"
+            f"{MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}, {PIPELINE_DEBUG_AUDIT_FILE}, or {REPOST_TRACKER_AUDIT_FILE}"
         )
         print("Please close the Excel files if they are open, then run this script again.")
         raise SystemExit(1)
 
     action_counts = all_ranked_jobs["next_action"].value_counts()
     final_action_counts = all_ranked_jobs["final_action"].value_counts()
+    manual_final_action_counts = manual_rows["final_action"].value_counts() if not manual_rows.empty else pd.Series(dtype=int)
     duplicate_counts = pd.to_numeric(ranked_jobs["duplicate_count"], errors="coerce").fillna(1)
     invalid_cache_mask = ranked_jobs["ai_review_source"].eq("cache_invalid")
     invalid_cache_excluded = int(
@@ -4136,11 +4537,26 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
     print(f"Ranked jobs excluded: {ranked_jobs_excluded}")
     print(f"Ranked jobs exclusion audit path: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"ai_review_queue count: {len(ai_review_queue)}")
+    print(f"Pipeline debug audit path: {PIPELINE_DEBUG_AUDIT_FILE}")
+    print(f"Repost tracker audit path: {REPOST_TRACKER_AUDIT_FILE}")
+    if not possible_repost_excluded.empty:
+        print("WARNING: Possible repost excluded. Check output/repost_tracker_audit.xlsx.")
     print(f"api_leads count: {len(api_leads)}")
     print(f"all_ranked_jobs count: {len(all_ranked_jobs)}")
-    print(f"Final Apply Today count: {int(final_action_counts.get('Apply Today', 0))}")
-    print(f"Final Strong Consider count: {int(final_action_counts.get('Strong Consider', 0))}")
-    print(f"Final Apply If Time count: {int(final_action_counts.get('Apply If Time', 0))}")
+    print(f"Overall final Apply Today count: {int(final_action_counts.get('Apply Today', 0))}")
+    print(f"Overall final Strong Consider count: {int(final_action_counts.get('Strong Consider', 0))}")
+    print(f"Overall final Apply If Time count: {int(final_action_counts.get('Apply If Time', 0))}")
+    print(f"Manual Apply Today count: {int(manual_final_action_counts.get('Apply Today', 0))}")
+    print(f"Manual Strong Consider count: {int(manual_final_action_counts.get('Strong Consider', 0))}")
+    print(f"Manual Apply If Time count: {int(manual_final_action_counts.get('Apply If Time', 0))}")
+    print(
+        "Manual ranked-action total: "
+        f"{int(manual_final_action_counts.get('Apply Today', 0)) + int(manual_final_action_counts.get('Strong Consider', 0)) + int(manual_final_action_counts.get('Apply If Time', 0))}"
+    )
+    print(
+        "Overall ranked-action total including API leads: "
+        f"{int(final_action_counts.get('Apply Today', 0)) + int(final_action_counts.get('Strong Consider', 0)) + int(final_action_counts.get('Apply If Time', 0))}"
+    )
     print(f"Final Manual Review count: {int(final_action_counts.get('Manual Review', 0))}")
     print(f"Final Skip count: {int(final_action_counts.get('Skip', 0))}")
     print(f"Final Pending AI Review count: {int(final_action_counts.get('Pending AI Review', 0))}")
@@ -4187,6 +4603,8 @@ def main(ai_review=None, force_manual_review=False, force_files="", ai_batch_cal
     print(f"Saved ranked jobs to: {OUTPUT_FILE}")
     print(f"Saved ranked jobs exclusion audit to: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"Saved AI review queue to: {AI_REVIEW_QUEUE_FILE}")
+    print(f"Saved pipeline debug audit to: {PIPELINE_DEBUG_AUDIT_FILE}")
+    print(f"Saved repost tracker audit to: {REPOST_TRACKER_AUDIT_FILE}")
     if ai_review == "batch":
         print(f"Saved manual AI coverage audit to: {MANUAL_AI_COVERAGE_AUDIT_FILE}")
         print(f"Saved manual pre-AI exclusion audit to: {MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}")
