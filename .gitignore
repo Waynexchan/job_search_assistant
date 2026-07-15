@@ -28,6 +28,9 @@ tracker/backups/
 
 # Raw job descriptions and API job cache
 jobs/raw_jobs/
+jobs/applied_jobs/
+jobs/archived_jobs/
+jobs/rejected_jobs/
 jobs/api_jobs.csv
 jobs/manual_jobs.csv
 

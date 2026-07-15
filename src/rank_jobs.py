@@ -39,6 +39,7 @@ RANKED_JOBS_EXCLUSION_AUDIT_FILE = PROJECT_ROOT / "output" / "ranked_jobs_exclus
 PIPELINE_DEBUG_AUDIT_FILE = PROJECT_ROOT / "output" / "pipeline_debug_audit.xlsx"
 REPOST_TRACKER_AUDIT_FILE = PROJECT_ROOT / "output" / "repost_tracker_audit.xlsx"
 API_LEADS_FILE = PROJECT_ROOT / "output" / "api_leads.xlsx"
+QUICK_APPLY_JOBS_FILE = PROJECT_ROOT / "output" / "quick_apply_jobs.xlsx"
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
 TRACKER_HISTORY_FILE = PROJECT_ROOT / "tracker" / "applications_history.xlsx"
 STRICT_MODE = True
@@ -509,6 +510,8 @@ def detect_source_from_apply_link(apply_link, fallback_source="Unknown"):
         return "Indeed"
     if "cord.co" in apply_link:
         return "CORD"
+    if "welcometothejungle.com" in apply_link:
+        return "Welcome to the Jungle"
     if "reed.co.uk" in apply_link:
         return "Reed"
     if "civilservicejobs.service.gov.uk" in apply_link:
@@ -523,6 +526,8 @@ def detect_source_from_apply_link(apply_link, fallback_source="Unknown"):
     # Backward compatibility: older files may still have a source line.
     if fallback_source.lower() == "cord":
         return "CORD"
+    if fallback_source.lower() in ["welcome to the jungle", "welcometothejungle", "wttj"]:
+        return "Welcome to the Jungle"
     if fallback_source and fallback_source != "Unknown":
         return fallback_source
 
@@ -561,6 +566,8 @@ def normalize_url_for_match(url):
     useful_query = {}
     useful_query_keys = ["jk", "vjk", "currentJobId", "redirect_url"]
     if "cord.co" in netloc:
+        useful_query_keys.extend(["jobId", "job_id", "job", "id"])
+    if "welcometothejungle.com" in netloc:
         useful_query_keys.extend(["jobId", "job_id", "job", "id"])
     for key in useful_query_keys:
         if key in query and query[key]:
@@ -625,6 +632,20 @@ def extract_url_job_identifiers(url):
             match = re.search(pattern, path)
             if match:
                 identifiers.add(f"cord:{match.group(1).lower()}")
+
+    if "welcometothejungle.com" in host:
+        for key in ["jobId", "job_id", "job", "id"]:
+            for value in query.get(key, []):
+                if str(value).strip():
+                    identifiers.add(f"welcometothejungle:{str(value).strip().lower()}")
+        for pattern in [
+            r"/jobs/([a-z0-9_-]+)",
+            r"/companies/[^/]+/jobs/([a-z0-9_-]+)",
+            r"/(?:en|fr|cs|es|sk|uk|de)/companies/[^/]+/jobs/([a-z0-9_-]+)",
+        ]:
+            match = re.search(pattern, path)
+            if match:
+                identifiers.add(f"welcometothejungle:{match.group(1).lower()}")
 
     return identifiers
 
@@ -1577,6 +1598,86 @@ def is_manual_job(job):
     return str(job.get("input_type", "")).lower() == "manual"
 
 
+def is_low_friction_apply_method(job):
+    """Detect manual jobs where applying is likely quick enough for looser volume triage."""
+    if not is_manual_job(job):
+        return False
+
+    searchable_text = "\n".join(
+        str(job.get(field, ""))
+        for field in [
+            "source",
+            "apply_link",
+            "job_title",
+            "company",
+            "manual_parse_notes",
+            "job_text",
+            "job_description",
+        ]
+    ).lower()
+    low_friction_phrases = [
+        "linkedin easy apply",
+        "indeed apply",
+        "indeed application",
+        "apply with your indeed",
+        "easy apply",
+        "quick apply",
+    ]
+    if any(phrase in searchable_text for phrase in low_friction_phrases):
+        return True
+
+    source = str(job.get("source", "")).lower()
+    apply_link = str(job.get("apply_link", "")).lower()
+    return "indeed" in source and "indeed." in apply_link
+
+
+def has_quick_apply_senior_title(job):
+    title = str(job.get("job_title", "")).lower()
+    senior_patterns = [
+        r"\bsenior\b",
+        r"\blead\b",
+        r"\bmanager\b",
+        r"\bhead\b",
+        r"\bdirector\b",
+    ]
+    return any(re.search(pattern, title) for pattern in senior_patterns) or has_senior_leadership_title(job)
+
+
+def has_far_office_based_risk(job):
+    red_flags = str(job.get("red_flags", "")).lower()
+    location_text = "\n".join(
+        str(job.get(field, ""))
+        for field in ["location", "job_text", "job_description", "manual_parse_notes"]
+    ).lower()
+    flexible_terms = ["remote", "hybrid", "home based", "work from home", "wfh"]
+    return "far location" in red_flags and not any(term in location_text for term in flexible_terms)
+
+
+def is_quick_apply_candidate(job):
+    return is_manual_job(job) and is_low_friction_apply_method(job)
+
+
+def is_quick_apply_output_candidate(job):
+    if not is_quick_apply_candidate(job):
+        return False
+    if has_quick_apply_senior_title(job):
+        return False
+    if is_contract_or_temporary_role(job):
+        return False
+    if is_clearly_non_target_manual_role(job) or has_irrelevant_title_without_data(job):
+        return False
+    if has_far_office_based_risk(job):
+        return False
+    if bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False)):
+        return False
+
+    action = str(job.get("final_action", ""))
+    score = get_ai_fit_score(job)
+    if action in ["Apply Today", "Strong Consider", "Apply If Time"]:
+        return True
+    return action == "Manual Review" and score is not None and score >= 55
+
+
 def has_valid_ai_decision(job):
     return has_valid_ai_result(job) and str(job.get("ai_final_action", "")) in [
         "Apply Today",
@@ -1714,6 +1815,8 @@ def get_manual_final_action_from_ai_score(job):
         return "Apply Today"
     if score >= 70:
         return "Strong Consider"
+    if is_quick_apply_candidate(job) and score >= 55:
+        return "Apply If Time"
     if score >= 60:
         return "Apply If Time"
     if score >= 50:
@@ -1736,10 +1839,11 @@ def has_ai_review_inconsistency(job):
     score = get_ai_fit_score(job)
     if score is None:
         return True
+    apply_if_time_floor = 55 if is_quick_apply_candidate(job) else 60
     return (
         (action == "Apply Today" and score < 80)
         or (action == "Strong Consider" and score < 70)
-        or (action == "Apply If Time" and score < 60)
+        or (action == "Apply If Time" and score < apply_if_time_floor)
         or (score < 50 and action in ["Apply Today", "Strong Consider", "Apply If Time"])
     )
 
@@ -4217,6 +4321,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     ranked_jobs = apply_repost_candidate_annotations(ranked_jobs)
     ranked_jobs["final_action_sort"] = ranked_jobs["final_action"].apply(get_action_bucket_rank)
     ranked_jobs["date_added_sort"] = pd.to_datetime(ranked_jobs["date_added"], errors="coerce").fillna(pd.Timestamp.min)
+    ranked_jobs["quick_apply_candidate"] = ranked_jobs.apply(is_quick_apply_candidate, axis=1)
     ranked_jobs = ranked_jobs.sort_values(
         by=["final_action_sort", "apply_priority_score", "date_added_sort", "location_fit_score", "score"],
         ascending=[True, False, False, False, False],
@@ -4251,6 +4356,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "pre_ai_bucket",
         "pre_ai_reason",
         "would_send_to_ai",
+        "quick_apply_candidate",
         "ai_review_priority_score",
         "needs_human_review",
         "human_review_reason",
@@ -4324,6 +4430,14 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         & deduped_ranked_jobs.apply(should_show_cache_invalid_rule_fallback, axis=1)
     )
     shown_ranked_jobs = deduped_ranked_jobs[ranked_jobs_include_mask][output_columns]
+    quick_apply_candidates = ranked_jobs[ranked_jobs.apply(is_quick_apply_output_candidate, axis=1)].copy()
+    quick_apply_candidates["_quick_apply_score_sort"] = pd.to_numeric(
+        quick_apply_candidates["ai_fit_score_normalized"], errors="coerce"
+    ).fillna(pd.to_numeric(quick_apply_candidates["ai_fit_score"], errors="coerce")).fillna(0)
+    quick_apply_jobs = quick_apply_candidates.sort_values(
+        by=["final_action_sort", "_quick_apply_score_sort", "apply_priority_score", "date_added_sort"],
+        ascending=[True, False, False, False],
+    )[output_columns]
     ranked_jobs_exclusion_audit = build_ranked_jobs_exclusion_audit(
         ranked_jobs,
         shown_ranked_jobs,
@@ -4443,6 +4557,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         ranked_jobs_exclusion_audit.to_excel(RANKED_JOBS_EXCLUSION_AUDIT_FILE, index=False)
         ai_review_queue.to_excel(AI_REVIEW_QUEUE_FILE, index=False)
         api_leads.to_excel(API_LEADS_FILE, index=False)
+        quick_apply_jobs.to_excel(QUICK_APPLY_JOBS_FILE, index=False)
         repost_tracker_audit.to_excel(REPOST_TRACKER_AUDIT_FILE, index=False)
         save_pipeline_debug_audit(PIPELINE_DEBUG_AUDIT_FILE, pipeline_debug_audit)
         if ai_review == "batch":
@@ -4452,7 +4567,8 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         print(
             f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, "
             f"{API_LEADS_FILE}, {RANKED_JOBS_EXCLUSION_AUDIT_FILE}, {MANUAL_AI_COVERAGE_AUDIT_FILE}, "
-            f"{MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}, {PIPELINE_DEBUG_AUDIT_FILE}, or {REPOST_TRACKER_AUDIT_FILE}"
+            f"{MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}, {QUICK_APPLY_JOBS_FILE}, {PIPELINE_DEBUG_AUDIT_FILE}, "
+            f"or {REPOST_TRACKER_AUDIT_FILE}"
         )
         print("Please close the Excel files if they are open, then run this script again.")
         raise SystemExit(1)
@@ -4536,6 +4652,8 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     print(f"Ranked jobs written: {ranked_jobs_written}")
     print(f"Ranked jobs excluded: {ranked_jobs_excluded}")
     print(f"Ranked jobs exclusion audit path: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
+    print(f"Quick apply candidates: {len(quick_apply_jobs)}")
+    print(f"Quick apply output path: {QUICK_APPLY_JOBS_FILE}")
     print(f"ai_review_queue count: {len(ai_review_queue)}")
     print(f"Pipeline debug audit path: {PIPELINE_DEBUG_AUDIT_FILE}")
     print(f"Repost tracker audit path: {REPOST_TRACKER_AUDIT_FILE}")
@@ -4602,6 +4720,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     print(f"Saved all ranked jobs to: {ALL_OUTPUT_FILE}")
     print(f"Saved ranked jobs to: {OUTPUT_FILE}")
     print(f"Saved ranked jobs exclusion audit to: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
+    print(f"Saved quick apply jobs to: {QUICK_APPLY_JOBS_FILE}")
     print(f"Saved AI review queue to: {AI_REVIEW_QUEUE_FILE}")
     print(f"Saved pipeline debug audit to: {PIPELINE_DEBUG_AUDIT_FILE}")
     print(f"Saved repost tracker audit to: {REPOST_TRACKER_AUDIT_FILE}")
@@ -4614,6 +4733,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "total_jobs_collected": len(load_api_jobs()),
         "total_jobs_scored": len(all_ranked_jobs),
         "jobs_shown": len(shown_ranked_jobs),
+        "quick_apply_jobs": len(quick_apply_jobs),
         "ai_review_queue": len(ai_review_queue),
         "api_leads": len(api_leads),
         "apply_now": int(action_counts.get("Apply now", 0)),

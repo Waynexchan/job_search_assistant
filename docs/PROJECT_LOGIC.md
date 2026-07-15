@@ -24,6 +24,7 @@ The project is intentionally local-first: tracker files, raw job descriptions, O
 - `jobs/api_jobs.csv`: deduplicated API discovery leads from Reed/Adzuna.
 - `output/ranked_jobs.xlsx`: main daily action list after ranking and AI review filtering.
 - `output/ranked_jobs_exclusion_audit.xlsx`: audit of manual `Apply Today`, `Strong Consider`, or `Apply If Time` rows that were not written to `ranked_jobs.xlsx`.
+- `output/quick_apply_jobs.xlsx`: optional volume list for low-friction LinkedIn Easy Apply, Indeed Apply, Easy Apply, or quick apply manual jobs.
 - `output/ai_review_queue.xlsx`: manual review, borderline, and pending AI review list.
 - `output/api_leads.xlsx`: API discovery leads only. These are not full JD AI review targets by default.
 - `output/all_ranked_jobs.xlsx`: full audit output with every ranked row.
@@ -113,7 +114,7 @@ Warning: `--no-ai-review` is diagnostic only. It should not be treated as the da
 - Active manual AI review scans `jobs/raw_jobs/*.txt` only. It does not scan `jobs/applied_jobs/`, `jobs/rejected_jobs/`, or `jobs/archived_jobs/` by default.
 - Manual jobs should normally reach AI review unless there is an exact tracker exclusion, a parse failure/empty unreadable file, an exact duplicate raw file, a contract/FTC/temp/day-rate role when permanent-only is preferred, a senior leadership title, a clearly non-target role, or an already valid cached AI result.
 - Manual jobs should not be hard skipped before AI only because of 3+ years wording, 2-4 years wording, mid-level wording, high salary, far location, hybrid uncertainty, domain mismatch, financial services/consulting/gaming/transport/healthcare domain, missing tools, or a stretch SQL/Python/Power BI requirement. Those concerns should be handled by AI scoring.
-- Manual raw job source detection recognises common pasted job links including LinkedIn, Indeed, Reed, Civil Service Jobs, Totaljobs, Glassdoor, Adzuna, and CORD (`cord.co`). A raw file can also specify `Source: CORD`.
+- Manual raw job source detection recognises common pasted job links including LinkedIn, Indeed, Reed, Civil Service Jobs, Totaljobs, Glassdoor, Adzuna, CORD (`cord.co`), and Welcome to the Jungle (`welcometothejungle.com`). A raw file can also specify `Source: CORD`, `Source: Welcome to the Jungle`, or `Source: WTTJ`.
 - `data/ai_review_cache.csv` is used to avoid repeated OpenAI API costs.
 
 ## Raw Job Lifecycle Archive Logic
@@ -212,6 +213,7 @@ output/manual_pre_ai_exclusion_audit.xlsx
 
 - `ranked_jobs.xlsx`: main daily action list.
 - `ranked_jobs_exclusion_audit.xlsx`: explains why any manual `Apply Today`, `Strong Consider`, or `Apply If Time` job was not written to `ranked_jobs.xlsx`.
+- `quick_apply_jobs.xlsx`: optional extra list for low-friction applications. It is for application volume, not the main priority list.
 - `ai_review_queue.xlsx`: manual review, borderline, and pending review list.
 - `api_leads.xlsx`: API discovery leads only.
 - `all_ranked_jobs.xlsx`: full audit file.
@@ -238,6 +240,10 @@ Manual full JD jobs use AI fit score thresholds after cache/OpenAI review:
 - `Apply If Time`: `60 <= ai_fit_score < 70`
 - `Manual Review`: `50 <= ai_fit_score < 60`
 - `Skip`: `ai_fit_score < 50`
+
+Company website applications use these stricter thresholds because they usually take more time. Manual jobs with low-friction application methods such as LinkedIn Easy Apply, Indeed Apply, Easy Apply, or quick apply keep the same `Apply Today` and `Strong Consider` thresholds, but can become `Apply If Time` from `ai_fit_score >= 55`.
+
+Low-friction manual jobs get `quick_apply_candidate=True`. `quick_apply_jobs.xlsx` includes quick-apply candidates with `Apply Today`, `Strong Consider`, `Apply If Time`, or `Manual Review` with `ai_fit_score >= 55`, while excluding senior/lead/manager/head/director roles, contract/FTC/day-rate/IR35 roles, clearly non-target roles, far office-based roles, and exact tracker matches.
 
 `ranked_jobs.xlsx` includes manual jobs with `Apply Today`, `Strong Consider`, and `Apply If Time` when they have a valid AI decision and are not blocked by a clear exclusion such as exact tracker match, hard skip, invalid AI/cache inconsistency, or deduplication. The terminal summary separates overall action counts, which may include API leads, from manual ranked-action counts, which should reconcile with `ranked_jobs.xlsx` plus `ranked_jobs_exclusion_audit.xlsx`.
 
@@ -300,6 +306,26 @@ Repost/audit fields include:
 - `previous_application_status`
 - `tracker_overlay_reason`
 - `next_action`
+
+## GitHub Privacy Safety
+
+Never commit private local job-search data:
+
+- `jobs/raw_jobs/`
+- `jobs/applied_jobs/`
+- `jobs/archived_jobs/`
+- `jobs/rejected_jobs/`
+- `jobs/api_jobs.csv`
+- `tracker/`
+- `output/`
+- `data/`
+- `cache/`
+- `logs/`
+- CVs and cover letters
+- `.xlsx`, `.pdf`, and `.docx` files
+- `credentials.json`, `token.json`, `.env`, and any credential/token files
+
+Commit source code, docs, README files, requirements/config templates, and fake examples only. The `examples/` folder must contain synthetic sample data, never real company/application history.
 
 ## Gmail Status Assistant Logic
 
@@ -405,3 +431,19 @@ Before modifying code:
 - Added a stronger guard around manual tracker exact exclusions so same company/title alone is treated as possible repost rather than automatic exclusion.
 - Added `--force-today` for batch OpenAI re-review of eligible manual raw job files modified today.
 - Added `--skip-api` so manual AI review can run without Reed/Adzuna API collection, and made API HTTP 503 handling preserve existing API jobs.
+
+### 2026-07-10
+
+- Added low-friction apply detection for LinkedIn Easy Apply, Indeed Apply, Easy Apply, and quick apply manual jobs.
+- Lowered only the low-friction manual `Apply If Time` threshold to `ai_fit_score >= 55`; `Apply Today` and `Strong Consider` thresholds remain unchanged.
+- Added `quick_apply_candidate` and `output/quick_apply_jobs.xlsx` as an optional quick-application volume list separate from the main `ranked_jobs.xlsx`.
+
+### 2026-07-12
+
+- Added Welcome to the Jungle (`welcometothejungle.com` / `WTTJ`) source detection for manually pasted raw job links.
+- Added Welcome to the Jungle URL job slug/id extraction for duplicate and tracker matching evidence.
+
+### 2026-07-15
+
+- Added GitHub privacy safety documentation and a fake `examples/sample_raw_job.txt`.
+- Updated `.gitignore` coverage for private raw/applied/archive/rejected job folders and local generated data.
