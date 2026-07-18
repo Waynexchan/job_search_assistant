@@ -40,6 +40,11 @@ PIPELINE_DEBUG_AUDIT_FILE = PROJECT_ROOT / "output" / "pipeline_debug_audit.xlsx
 REPOST_TRACKER_AUDIT_FILE = PROJECT_ROOT / "output" / "repost_tracker_audit.xlsx"
 API_LEADS_FILE = PROJECT_ROOT / "output" / "api_leads.xlsx"
 QUICK_APPLY_JOBS_FILE = PROJECT_ROOT / "output" / "quick_apply_jobs.xlsx"
+APPLICATION_PACK_RECOMMENDATIONS_FILE = PROJECT_ROOT / "output" / "application_pack_recommendations.xlsx"
+RAW_JOB_TRACE_AUDIT_FILE = PROJECT_ROOT / "output" / "raw_job_trace_audit.xlsx"
+FILTERED_JOBS_FILE = PROJECT_ROOT / "output" / "filtered_jobs.xlsx"
+DUPLICATES_FILE = PROJECT_ROOT / "output" / "duplicates.xlsx"
+PARSING_ERRORS_FILE = PROJECT_ROOT / "output" / "parsing_errors.xlsx"
 TRACKER_FILE = PROJECT_ROOT / "tracker" / "applications.xlsx"
 TRACKER_HISTORY_FILE = PROJECT_ROOT / "tracker" / "applications_history.xlsx"
 STRICT_MODE = True
@@ -72,11 +77,21 @@ def cfg(name, default):
 # Simple UK locations to look for inside pasted job descriptions.
 UK_LOCATIONS = [
     "Milton Keynes",
+    "Bletchley",
+    "Wolverton",
+    "Newport Pagnell",
     "London",
     "Birmingham",
     "Luton",
     "Bedford",
     "Northampton",
+    "Brixworth",
+    "Towcester",
+    "Leighton Buzzard",
+    "Dunstable",
+    "Buckingham",
+    "Wellingborough",
+    "Aylesbury",
     "Remote",
     "Hybrid",
 ]
@@ -86,14 +101,39 @@ GOOD_ROLE_KEYWORDS = [
     "junior data analyst",
     "graduate data analyst",
     "data analyst",
+    "operations data analyst",
     "reporting analyst",
+    "reporting officer",
     "mi analyst",
     "bi analyst",
     "power bi analyst",
+    "business intelligence analyst",
+    "business intelligence officer",
     "commercial analyst",
     "operations analyst",
+    "business operations analyst",
+    "business analyst",
+    "hr business analyst",
+    "graduate business analyst",
+    "process analyst",
+    "systems analyst",
+    "change analyst",
     "insight analyst",
+    "insight executive",
+    "data insights analyst",
+    "data insight analyst",
+    "performance analyst",
+    "data quality analyst",
     "product analyst",
+    "customer analyst",
+    "sales analyst",
+    "revenue analyst",
+    "pricing analyst",
+    "finance analyst",
+    "junior finance analyst",
+    "financial reporting analyst",
+    "commercial finance analyst",
+    "performance and planning analyst",
     "customer insight analyst",
     "people data analyst",
     "workforce analyst",
@@ -143,6 +183,17 @@ BUSINESS_KEYWORDS = [
     "sales",
     "revenue",
     "customer",
+    "complaint",
+    "case data",
+    "regulated",
+    "financial services",
+    "banking",
+    "insurance",
+    "budgeting",
+    "forecasting",
+    "variance",
+    "reconciliation",
+    "reconciliations",
     "retail",
     "ecommerce",
     "e-commerce",
@@ -152,6 +203,13 @@ BUSINESS_KEYWORDS = [
     "warehouse",
     "transport",
     "crm",
+    "uat",
+    "quality assurance",
+    "data validation",
+    "data quality",
+    "root cause",
+    "process improvement",
+    "stakeholder",
 ]
 
 # These words show that a Commercial Analyst job is actually analytical.
@@ -238,11 +296,22 @@ TARGET_TITLE_KEYWORDS = [
     "analyst",
     "data",
     "reporting",
+    "reporting officer",
     "bi",
     "mi",
     "insight",
+    "executive",
+    "officer",
     "commercial",
     "operations",
+    "business intelligence",
+    "business analyst",
+    "finance",
+    "financial reporting",
+    "performance",
+    "planning",
+    "systems analyst",
+    "process analyst",
 ]
 
 # These are common API results that are usually not relevant to this search.
@@ -297,107 +366,110 @@ STRONG_DATA_KEYWORDS = [
     "kpis",
 ]
 
-# Recommendation rules. The script checks job titles first, then job text.
+APPLICATION_MATERIALS = {
+    "business_intelligence_officer": {
+        "cv": "cv_two_page_business_intelligence_officer.docx",
+        "cover_letter": "cover_letter_business_intelligence_officer_ats.docx",
+        "label": "Business Intelligence Officer",
+    },
+    "data_analyst": {
+        "cv": "cv_two_page_data_analyst.docx",
+        "cover_letter": "cover_letter_data_analyst_ats.docx",
+        "label": "Data Analyst",
+    },
+    "bi_reporting_mi_analyst": {
+        "cv": "cv_two_page_bi_reporting_mi_analyst.docx",
+        "cover_letter": "cover_letter_bi_reporting_mi_analyst_ats.docx",
+        "label": "BI / Reporting / MI Analyst",
+    },
+    "commercial_analyst": {
+        "cv": "cv_two_page_commercial_analyst.docx",
+        "cover_letter": "cover_letter_commercial_analyst_ats.docx",
+        "label": "Commercial Analyst",
+    },
+    "business_operations_analyst": {
+        "cv": "cv_two_page_business_operations_analyst.docx",
+        "cover_letter": "cover_letter_business_operations_analyst_ats.docx",
+        "label": "Business Operations Analyst",
+    },
+    "finance_economics_analyst": {
+        "cv": "cv_two_page_finance_economics_analyst.docx",
+        "cover_letter": "cover_letter_finance_economics_analyst_ats.docx",
+        "label": "Finance / Economics Analyst",
+    },
+}
+
+APPLICATION_CATEGORY_ALIASES = {
+    "business intelligence officer": "business_intelligence_officer",
+    "bi officer": "business_intelligence_officer",
+    "public sector reporting": "business_intelligence_officer",
+    "council": "business_intelligence_officer",
+    "local government": "business_intelligence_officer",
+    "data analyst": "data_analyst",
+    "junior data analyst": "data_analyst",
+    "graduate data analyst": "data_analyst",
+    "associate data analyst": "data_analyst",
+    "bi analyst": "bi_reporting_mi_analyst",
+    "reporting analyst": "bi_reporting_mi_analyst",
+    "mi analyst": "bi_reporting_mi_analyst",
+    "power bi analyst": "bi_reporting_mi_analyst",
+    "dashboard analyst": "bi_reporting_mi_analyst",
+    "management information": "bi_reporting_mi_analyst",
+    "commercial analyst": "commercial_analyst",
+    "sales analyst": "commercial_analyst",
+    "pricing analyst": "commercial_analyst",
+    "revenue analyst": "commercial_analyst",
+    "customer insight": "commercial_analyst",
+    "retail analyst": "commercial_analyst",
+    "business analyst": "business_operations_analyst",
+    "operations analyst": "business_operations_analyst",
+    "process analyst": "business_operations_analyst",
+    "performance analyst": "business_operations_analyst",
+    "business operations": "business_operations_analyst",
+    "finance analyst": "finance_economics_analyst",
+    "economics analyst": "finance_economics_analyst",
+    "treasury analyst": "finance_economics_analyst",
+    "commercial finance analyst": "finance_economics_analyst",
+    "junior commercial finance analyst": "finance_economics_analyst",
+}
+
+# Recommendation rules. The script checks title/company first, then description.
 RECOMMENDATION_RULES = [
     {
+        "category": "business_intelligence_officer",
+        "role_type": "business intelligence officer",
+        "title_keywords": ["business intelligence officer", "bi officer", "performance reporting"],
+        "description_keywords": ["council", "local government", "public sector reporting", "statutory data", "business intelligence"],
+    },
+    {
+        "category": "data_analyst",
         "role_type": "data analyst",
-        "cv": "cvs/cv_data_analyst.pdf",
-        "cover_letter": "cover_letters/cover_data_analyst.docx",
-        "title_keywords": [
-            "data analyst",
-            "junior data analyst",
-            "product data analyst",
-            "analytics analyst",
-        ],
-        "description_keywords": [
-            "sql",
-            "python",
-            "power bi",
-            "powerbi",
-            "bigquery",
-            "data analysis",
-        ],
+        "title_keywords": ["junior data analyst", "graduate data analyst", "associate data analyst", "data analyst"],
+        "description_keywords": ["sql", "python", "power bi", "powerbi", "bigquery", "data analysis"],
     },
     {
-        "role_type": "bi reporting analyst",
-        "cv": "cvs/cv_bi_reporting_analyst.pdf",
-        "cover_letter": "cover_letters/cover_bi_reporting_analyst.docx",
-        "title_keywords": [
-            "bi analyst",
-            "reporting analyst",
-            "mi analyst",
-            "dashboard analyst",
-        ],
-        "description_keywords": [
-            "power bi",
-            "powerbi",
-            "reporting",
-            "dashboards",
-            "dashboard",
-            "kpis",
-            "kpi",
-            "dax",
-            "power query",
-        ],
+        "category": "bi_reporting_mi_analyst",
+        "role_type": "bi reporting mi analyst",
+        "title_keywords": ["bi analyst", "reporting analyst", "mi analyst", "power bi analyst", "dashboard analyst", "management information"],
+        "description_keywords": ["power bi", "powerbi", "reporting", "dashboards", "dashboard", "kpis", "kpi", "dax", "power query", "management information"],
     },
     {
+        "category": "commercial_analyst",
         "role_type": "commercial analyst",
-        "cv": "cvs/cv_commercial_analyst.pdf",
-        "cover_letter": "cover_letters/cover_commercial_analyst.docx",
-        "title_keywords": [
-            "commercial analyst",
-            "sales analyst",
-            "revenue analyst",
-            "customer analyst",
-            "retail analyst",
-        ],
-        "description_keywords": [
-            "commercial performance",
-            "sales",
-            "revenue",
-            "customer behaviour",
-            "customer behavior",
-            "customer",
-            "retail",
-            "ecommerce",
-            "e-commerce",
-            "operations",
-        ],
+        "title_keywords": ["commercial analyst", "sales analyst", "pricing analyst", "revenue analyst", "customer insight", "retail analyst"],
+        "description_keywords": ["commercial performance", "sales", "revenue", "customer behaviour", "customer behavior", "retail", "ecommerce", "e-commerce", "pricing"],
     },
     {
+        "category": "business_operations_analyst",
         "role_type": "business operations analyst",
-        "cv": "cvs/cv_business_operations_analyst.pdf",
-        "cover_letter": "cover_letters/cover_business_operations_analyst.docx",
-        "title_keywords": [
-            "business analyst",
-            "operations analyst",
-            "process analyst",
-        ],
-        "description_keywords": [
-            "process improvement",
-            "stakeholder communication",
-            "operational reporting",
-            "documentation",
-        ],
+        "title_keywords": ["business analyst", "operations analyst", "process analyst", "performance analyst", "business operations"],
+        "description_keywords": ["process improvement", "stakeholder communication", "operational reporting", "documentation", "requirements", "uat", "operations"],
     },
     {
+        "category": "finance_economics_analyst",
         "role_type": "finance economics analyst",
-        "cv": "cvs/cv_finance_economics_analyst.pdf",
-        "cover_letter": "cover_letters/cover_finance_economics_analyst.docx",
-        "title_keywords": [
-            "finance analyst",
-            "financial analyst",
-            "economics analyst",
-            "treasury analyst",
-        ],
-        "description_keywords": [
-            "finance",
-            "economics",
-            "pricing",
-            "forecasting",
-            "budgeting",
-            "financial reporting",
-        ],
+        "title_keywords": ["junior commercial finance analyst", "commercial finance analyst", "finance analyst", "financial analyst", "economics analyst", "treasury analyst"],
+        "description_keywords": ["finance", "economics", "forecasting", "budgeting", "financial reporting", "variance", "reconciliations"],
     },
 ]
 
@@ -664,25 +736,66 @@ METADATA_LABELS = {
     "status": "status",
 }
 FULL_JD_LABELS = {"full jd", "full job description", "job description", "description"}
+UI_NOISE_VALUES = {
+    "",
+    "apply",
+    "save",
+    "share",
+    "show more options",
+    "show match details",
+    "beta",
+    "is this information helpful?",
+    "responses managed off linkedin",
+    "promoted by hirer",
+    "job match summary not available",
+    "your profile matches several required qualifications",
+    "your profile matches some required qualifications",
+    "your profile is missing required qualifications",
+}
 PREFERRED_TITLE_PATTERNS = [
     "junior data analyst",
     "graduate data analyst",
     "data analyst",
+    "operations data analyst",
     "reporting analyst",
+    "reporting officer",
     "mi analyst",
     "bi analyst",
     "power bi analyst",
+    "business intelligence analyst",
+    "business intelligence officer",
     "commercial analyst",
     "operations analyst",
+    "business operations analyst",
+    "business analyst",
+    "hr business analyst",
+    "graduate business analyst",
+    "process analyst",
+    "systems analyst",
+    "change analyst",
     "insight analyst",
+    "insight executive",
+    "data insight analyst",
+    "data insights analyst",
+    "performance analyst",
+    "data quality analyst",
     "product analyst",
+    "customer analyst",
+    "sales analyst",
+    "revenue analyst",
+    "pricing analyst",
+    "finance analyst",
+    "junior finance analyst",
+    "financial reporting analyst",
+    "commercial finance analyst",
+    "performance and planning analyst",
     "customer insight analyst",
     "people data analyst",
     "workforce analyst",
 ]
 LOCATION_PATTERN = re.compile(
-    r"\b(?:Milton Keynes|Northampton|Bedford|Luton|Birmingham|London|Remote|Hybrid|United Kingdom|UK)"
-    r"(?:\s*[,/|-]\s*(?:Remote|Hybrid|United Kingdom|UK|Milton Keynes|Northampton|Bedford|Luton|Birmingham|London))*\b",
+    r"\b(?:Milton Keynes|Bletchley|Wolverton|Newport Pagnell|Northampton|Bedford|Luton|Brixworth|Towcester|Leighton Buzzard|Dunstable|Buckingham|Wellingborough|Aylesbury|Birmingham|London|Remote|Hybrid|United Kingdom|UK)"
+    r"(?:\s*[,/|-]\s*(?:Remote|Hybrid|United Kingdom|UK|Milton Keynes|Bletchley|Wolverton|Newport Pagnell|Northampton|Bedford|Luton|Brixworth|Towcester|Leighton Buzzard|Dunstable|Buckingham|Wellingborough|Aylesbury|Birmingham|London))*\b",
     flags=re.IGNORECASE,
 )
 SALARY_PATTERN = re.compile(
@@ -706,18 +819,42 @@ def strip_urls(line):
     return URL_PATTERN.sub("", str(line)).strip()
 
 
+def normalize_manual_line(line):
+    text = html.unescape(str(line or ""))
+    text = re.sub(r"[\u200b-\u200f\ufeff]", "", text)
+    text = text.replace("\xa0", " ")
+    text = text.replace("�", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_ui_noise_line(line):
+    cleaned = normalize_manual_line(line)
+    lower = cleaned.lower().strip()
+    if lower in UI_NOISE_VALUES:
+        return True
+    if lower.startswith("save ") and " at " in lower:
+        return False
+    if lower.startswith(("save ", "apply ", "retry premium", "get personalized tips")):
+        return True
+    if "cookie" in lower and len(lower) < 120:
+        return True
+    if "linkedin" in lower and any(term in lower for term in ["premium", "show more", "profile matches"]):
+        return True
+    return False
+
+
 def clean_manual_lines_for_extraction(full_text):
     lines = []
     for line in str(full_text).splitlines():
         key, value = parse_metadata_line(line)
         if key in ["job_title", "company", "location", "salary"]:
             if value:
-                lines.append(value)
+                lines.append(normalize_manual_line(value))
             continue
         if key or line.strip().lower().rstrip(":") in FULL_JD_LABELS:
             continue
-        cleaned = strip_urls(line)
-        if cleaned:
+        cleaned = normalize_manual_line(strip_urls(line))
+        if cleaned and not is_ui_noise_line(cleaned):
             lines.append(cleaned)
     return lines
 
@@ -766,17 +903,72 @@ def extract_salary_from_text(text):
     return ""
 
 
+def clean_title_candidate(value):
+    text = normalize_manual_line(value)
+    text = re.sub(r"\s*-\s*job post\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s+logo\s*$", "", text, flags=re.IGNORECASE).strip()
+    return text
+
+
+def clean_company_candidate(value):
+    text = normalize_manual_line(value)
+    text = re.sub(r"\s+logo\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s+·\s+.*$", "", text).strip()
+    text = re.sub(r"\s+繚\s+.*$", "", text).strip()
+    text = text.strip(" -|,.;:")
+    return text
+
+
+def extract_save_title_company(full_text):
+    for line in clean_manual_lines_for_extraction(full_text):
+        match = re.match(r"^save\s+(.+?)\s+at\s+(.+)$", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = clean_title_candidate(match.group(1))
+        company = clean_company_candidate(match.group(2))
+        if title and company and not is_ui_noise_line(title) and not is_ui_noise_line(company):
+            return title, company
+    return "", ""
+
+
+def extract_body_company_hint(full_text, current_company=""):
+    text = normalize_manual_line(full_text)
+    patterns = [
+        r"\bjoin(?:ing)?(?:\s+our|\s+the)?[^.\n]{0,140}\s+at\s+([A-Z][A-Za-z0-9&'().,\- ]{2,80})(?=\.|\n|$)",
+        r"\bwe(?:'|’)re recruiting[^.\n]{0,160}\s+at\s+([A-Z][A-Za-z0-9&'().,\- ]{2,80})(?=\.|\n|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            company = clean_company_candidate(match.group(1))
+            if company and not is_ui_noise_line(company):
+                return company
+    return current_company
+
+
+def looks_like_role_title(line):
+    candidate = clean_title_candidate(line)
+    lower = candidate.lower()
+    if not candidate or is_ui_noise_line(candidate):
+        return False
+    if LOCATION_PATTERN.search(candidate) or SALARY_PATTERN.search(candidate):
+        return False
+    return any(pattern in lower for pattern in PREFERRED_TITLE_PATTERNS) or re.search(r"\b(analyst|officer|executive)\b", lower)
+
+
 def extract_manual_title(full_text, metadata, file_name):
     if metadata.get("job_title"):
         return metadata["job_title"], "High", ""
+    save_title, _save_company = extract_save_title_company(full_text)
+    if save_title:
+        return save_title, "High", "title extracted from save/apply line"
     lines = clean_manual_lines_for_extraction(full_text)[:30]
     for line in lines:
-        line_lower = line.lower()
-        if any(title in line_lower for title in PREFERRED_TITLE_PATTERNS):
-            return line, "Medium", ""
+        if looks_like_role_title(line):
+            return clean_title_candidate(line), "Medium", ""
     for line in lines:
         if re.search(r"\banalyst\b", line, flags=re.IGNORECASE):
-            return re.sub(r"\s*-\s*job post\s*$", "", line, flags=re.IGNORECASE).strip(), "Medium", ""
+            return clean_title_candidate(line), "Medium", ""
     fallback = Path(file_name).stem.replace("_", " ").replace("-", " ").strip()
     return fallback or "Unknown", "Low", "title inferred from filename"
 
@@ -784,22 +976,20 @@ def extract_manual_title(full_text, metadata, file_name):
 def extract_manual_company(full_text, metadata, title):
     if metadata.get("company"):
         return metadata["company"], "High", ""
+    _save_title, save_company = extract_save_title_company(full_text)
+    body_company = extract_body_company_hint(full_text, save_company)
+    if body_company:
+        confidence = "High" if body_company != save_company else "Medium"
+        note = "company extracted from body" if body_company != save_company else "company extracted from save/apply line"
+        return body_company, confidence, note
     lines = clean_manual_lines_for_extraction(full_text)[:10]
     ignored = {str(title).strip().lower(), ""}
-    ui_terms = {
-        "share",
-        "show more options",
-        "easy apply",
-        "save",
-        "promoted by hirer",
-        "your profile matches several required qualifications",
-    }
     for line in lines:
-        line = re.sub(r"\s+logo\s*$", "", line, flags=re.IGNORECASE).strip()
+        line = clean_company_candidate(line)
         line_lower = line.lower()
         if line_lower in ignored:
             continue
-        if line_lower in ui_terms or line_lower.startswith("save "):
+        if is_ui_noise_line(line):
             continue
         if LOCATION_PATTERN.search(line) or SALARY_PATTERN.search(line):
             continue
@@ -813,9 +1003,19 @@ def extract_manual_location(full_text, metadata):
     if metadata.get("location"):
         return metadata["location"], "High", ""
     lines = clean_manual_lines_for_extraction(full_text)
+    specific_location_pattern = re.compile(
+        r"\b(?:Milton Keynes|Bletchley|Wolverton|Newport Pagnell|Northampton|Bedford|Luton|Brixworth|Towcester|Leighton Buzzard|Dunstable|Buckingham|Wellingborough|Aylesbury|Birmingham|London|Remote|Hybrid)\b",
+        flags=re.IGNORECASE,
+    )
     for line in lines[:40]:
-        match = LOCATION_PATTERN.search(line)
+        match = specific_location_pattern.search(line)
         if match:
+            return match.group(0).strip(), "Medium", ""
+    for line in lines[:40]:
+        if re.search(r"\blogo\b", line, flags=re.IGNORECASE):
+            continue
+        match = LOCATION_PATTERN.search(line)
+        if match and match.group(0).strip().lower() not in ["uk", "united kingdom"]:
             return match.group(0).strip(), "Medium", ""
     match = LOCATION_PATTERN.search(str(full_text))
     if match:
@@ -839,10 +1039,45 @@ def build_manual_job_text(full_text):
     return "\n".join(description_lines).strip()
 
 
-def parse_job_file(job_path):
-    """Read one .txt file and extract metadata from either structured or URL-first text."""
-    with open(job_path, "r", encoding="utf-8") as file:
-        full_text = file.read()
+def read_manual_text(job_path):
+    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+    last_error = None
+    for encoding in encodings:
+        try:
+            return job_path.read_text(encoding=encoding), encoding
+        except UnicodeDecodeError as error:
+            last_error = error
+    return job_path.read_text(encoding="utf-8", errors="ignore"), f"utf-8-ignore after {type(last_error).__name__}"
+
+
+def split_manual_job_blocks(full_text):
+    save_lines = []
+    for index, line in enumerate(str(full_text).splitlines()):
+        cleaned = normalize_manual_line(strip_urls(line))
+        if re.match(r"^save\s+.+?\s+at\s+.+$", cleaned, flags=re.IGNORECASE):
+            save_lines.append((index, cleaned.lower()))
+    unique_save_lines = []
+    seen = set()
+    for index, line in save_lines:
+        if line not in seen:
+            seen.add(line)
+            unique_save_lines.append((index, line))
+    if len(unique_save_lines) <= 1:
+        return [full_text]
+
+    raw_lines = str(full_text).splitlines()
+    blocks = []
+    for position, (start_index, _line) in enumerate(unique_save_lines):
+        end_index = unique_save_lines[position + 1][0] if position + 1 < len(unique_save_lines) else len(raw_lines)
+        prefix_start = max(0, start_index - 8)
+        block = "\n".join(raw_lines[prefix_start:end_index]).strip()
+        if block:
+            blocks.append(block)
+    return blocks or [full_text]
+
+
+def parse_job_block(job_path, full_text, file_encoding="utf-8", block_index=1, block_count=1):
+    """Extract one manual job record from structured, LinkedIn, Indeed or URL-first text."""
 
     metadata = {}
     for line in full_text.splitlines():
@@ -868,10 +1103,21 @@ def parse_job_file(job_path):
     if not job_text:
         job_text = full_text.strip()
         notes.append("job text fallback used full raw file content")
+    if block_count > 1:
+        notes.append(f"job block {block_index} of {block_count}")
+
+    raw_job_id = f"{job_path.name}#{block_index}" if block_count > 1 else job_path.name
 
     return {
         "input_type": "manual",
-        "file_name": job_path.name,
+        "file_name": raw_job_id,
+        "source_file": job_path.name,
+        "raw_file_path": str(job_path),
+        "file_encoding": file_encoding,
+        "job_blocks_detected": block_count,
+        "raw_job_id": raw_job_id,
+        "parsed_successfully": True,
+        "parser_warning": "; ".join(notes),
         "date_added": "",
         "source": detect_source_from_apply_link(apply_link, old_source),
         "apply_link": apply_link,
@@ -895,11 +1141,18 @@ def parse_job_file(job_path):
     }
 
 
+def parse_job_file(job_path):
+    """Read one .txt file and extract the first job record for compatibility."""
+    full_text, file_encoding = read_manual_text(job_path)
+    return parse_job_block(job_path, full_text, file_encoding=file_encoding)
+
+
 def fallback_manual_job(job_path, error):
     try:
-        full_text = job_path.read_text(encoding="utf-8", errors="ignore")
+        full_text, file_encoding = read_manual_text(job_path)
     except OSError:
         full_text = ""
+        file_encoding = "unreadable"
     apply_link = clean_apply_link(extract_first_url(full_text))
     file_title = job_path.stem.replace("_", " ").replace("-", " ").strip() or "Unknown"
     notes = [
@@ -912,6 +1165,13 @@ def fallback_manual_job(job_path, error):
     return {
         "input_type": "manual",
         "file_name": job_path.name,
+        "source_file": job_path.name,
+        "raw_file_path": str(job_path),
+        "file_encoding": file_encoding,
+        "job_blocks_detected": 0,
+        "raw_job_id": job_path.name,
+        "parsed_successfully": False,
+        "parser_warning": "; ".join(notes),
         "date_added": "",
         "source": detect_source_from_apply_link(apply_link, "Manual"),
         "apply_link": apply_link,
@@ -936,14 +1196,25 @@ def fallback_manual_job(job_path, error):
 
 
 def load_raw_jobs():
-    """Scan jobs/raw_jobs/ and load every .txt file as one job."""
+    """Scan jobs/raw_jobs/ and load every .txt file as one or more auditable jobs."""
     job_rows = []
     parse_failures = []
     raw_files = sorted(RAW_JOBS_DIR.glob("*.txt"))
 
     for job_path in raw_files:
         try:
-            job_rows.append(parse_job_file(job_path))
+            full_text, file_encoding = read_manual_text(job_path)
+            blocks = split_manual_job_blocks(full_text)
+            for index, block in enumerate(blocks, start=1):
+                job_rows.append(
+                    parse_job_block(
+                        job_path,
+                        block,
+                        file_encoding=file_encoding,
+                        block_index=index,
+                        block_count=len(blocks),
+                    )
+                )
         except Exception as error:
             parse_failures.append({"file_name": job_path.name, "reason": str(error)})
             job_rows.append(fallback_manual_job(job_path, error))
@@ -1343,12 +1614,22 @@ def is_realistic_location(job):
     location_text = f"{job.get('location', '')}\n{job.get('job_text', '')}".lower()
     realistic_locations = [
         "milton keynes",
+        "bletchley",
+        "wolverton",
+        "newport pagnell",
         "london",
         "remote",
         "hybrid",
         "luton",
         "bedford",
         "northampton",
+        "brixworth",
+        "towcester",
+        "leighton buzzard",
+        "dunstable",
+        "buckingham",
+        "wellingborough",
+        "aylesbury",
         "birmingham",
         "united kingdom",
         " uk",
@@ -1356,19 +1637,311 @@ def is_realistic_location(job):
     return any(location in location_text for location in realistic_locations)
 
 
-def get_location_fit_score(job):
+def get_location_tier(job):
     location_text = f"{job.get('location', '')}\n{job.get('job_text', '')}".lower()
+    if "remote" in location_text and "united kingdom" in location_text:
+        return "Remote UK"
     if "remote" in location_text:
+        return "Remote"
+    tier_1 = ["milton keynes", "central milton keynes", "bletchley", "wolverton", "newport pagnell"]
+    tier_2 = ["bedford", "northampton", "luton", "brixworth"]
+    tier_3 = ["towcester", "leighton buzzard", "dunstable", "buckingham", "wellingborough", "aylesbury"]
+    if any(place in location_text for place in tier_1):
+        return "Tier 1 - Milton Keynes"
+    if any(place in location_text for place in tier_2):
+        return "Tier 2 - very high priority commute"
+    if any(place in location_text for place in tier_3):
+        return "Tier 3 - drivable commute"
+    if "london" in location_text:
+        return "London - commute review"
+    if any(term in location_text for term in ["united kingdom", " uk", "hybrid"]):
+        return "UK/hybrid - needs review"
+    return "Unknown"
+
+
+def get_remote_hybrid_onsite(job):
+    text = f"{job.get('location', '')}\n{job.get('job_text', '')}".lower()
+    if "remote" in text:
+        return "Remote"
+    if "hybrid" in text:
+        return "Hybrid"
+    if "on-site" in text or "onsite" in text:
+        return "On-site"
+    return "Unknown"
+
+
+def classify_role_family(job):
+    title = str(job.get("job_title", "")).lower()
+    text = f"{title}\n{job.get('job_text', '')}".lower()
+    if any(term in title for term in ["business intelligence", "bi analyst", "reporting", "mi analyst", "performance analyst"]):
+        return "Data and BI"
+    if any(term in title for term in ["data analyst", "insight analyst", "insight executive", "data insight", "customer insight", "data quality"]):
+        return "Data and BI"
+    if "business analyst" in title:
+        if any(term in text for term in ["reporting", "dashboard", "data", "process improvement", "requirements", "uat", "systems", "hris"]):
+            return "Business and Operations"
+        return "Business Analyst - needs review"
+    if any(term in title for term in ["operations analyst", "process analyst", "systems analyst", "change analyst"]):
+        return "Business and Operations"
+    if any(term in title for term in ["commercial", "finance", "financial", "pricing", "sales analyst", "revenue", "product analyst", "customer analyst"]):
+        return "Commercial and Finance"
+    if has_target_title_keyword(title):
+        return "Target-adjacent"
+    return "Non-target/unknown"
+
+
+def get_location_fit_score(job):
+    tier = get_location_tier(job)
+    if tier in ["Remote UK", "Remote", "Tier 1 - Milton Keynes"]:
         return 100
-    if "hybrid" in location_text and any(city in location_text for city in ["milton keynes", "london", "birmingham", "northampton"]):
-        return 95
-    if "milton keynes" in location_text:
-        return 90
-    if any(city in location_text for city in ["northampton", "birmingham", "london", "luton", "bedford"]):
-        return 75
-    if "united kingdom" in location_text or " uk" in location_text:
+    if tier == "Tier 2 - very high priority commute":
+        return 92
+    if tier == "Tier 3 - drivable commute":
+        return 82
+    if tier == "London - commute review":
+        office_days = str(job.get("job_text", "")).lower()
+        if any(term in office_days for term in ["3 days", "three days", "4 days", "four days", "5 days", "five days"]):
+            return 55
+        return 70
+    if tier == "UK/hybrid - needs review":
         return 65
-    return 20
+    return 45
+
+
+def calculate_title_role_family_score(job):
+    family = classify_role_family(job)
+    title = str(job.get("job_title", "")).lower()
+    if family == "Data and BI":
+        return 90
+    if family == "Business and Operations":
+        return 78
+    if family == "Commercial and Finance":
+        return 74
+    if family == "Business Analyst - needs review":
+        return 58
+    if family == "Target-adjacent":
+        return 55
+    if any(term in title for term in ["graduate", "officer", "executive"]):
+        return 55
+    return 25
+
+
+def calculate_technical_match_score(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}\n{job.get('job_description', '')}"
+    matches = find_matches(text, TECHNICAL_KEYWORDS + ["data cleansing", "data validation", "uat", "quality assurance", "root cause"])
+    return min(100, len(matches) * 10)
+
+
+def calculate_direct_experience_score(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}".lower()
+    direct_terms = [
+        "sql",
+        "power bi",
+        "excel",
+        "dashboard",
+        "reporting",
+        "data quality",
+        "data validation",
+        "kpi",
+        "analysis",
+    ]
+    return min(100, len(find_matches(text, direct_terms)) * 9)
+
+
+def calculate_transferable_experience_score(job):
+    text = f"{job.get('job_title', '')}\n{job.get('company', '')}\n{job.get('job_text', '')}".lower()
+    score = 0
+    if find_matches(text, ["transport", "logistics", "supply chain", "fleet", "operations"]):
+        score += 24
+    if find_matches(text, ["financial services", "banking", "insurance", "regulated", "finance", "complaint", "ombudsman"]):
+        score += 20
+    if find_matches(text, ["retail", "ecommerce", "e-commerce", "commercial", "product", "pricing", "sales", "revenue", "customer insight"]):
+        score += 18
+    if find_matches(text, ["uat", "testing", "validation", "quality assurance", "rules", "process improvement", "root cause"]):
+        score += 18
+    if find_matches(text, ["stakeholder", "communication", "prioritisation", "prioritization", "business ownership"]):
+        score += 10
+    if find_matches(text, ["graduate", "business economics", "degree"]):
+        score += 10
+    return min(100, score)
+
+
+def calculate_salary_score(job):
+    salary_max = get_salary_max(job)
+    location_score = get_location_fit_score(job)
+    if not salary_max:
+        return 70
+    if location_score >= 82:
+        if salary_max >= 30000:
+            return 90
+        if salary_max >= 28000:
+            return 82
+        if salary_max >= 27000:
+            return 72
+        if salary_max >= 26000:
+            return 58
+        return 40
+    if "london" in str(job.get("location", "")).lower() and salary_max < 35000:
+        return 45
+    return 70 if salary_max >= 28000 else 55
+
+
+def calculate_career_value_score(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}".lower()
+    value_terms = [
+        "sql",
+        "power bi",
+        "dashboard",
+        "business intelligence",
+        "reporting",
+        "data validation",
+        "data quality",
+        "process improvement",
+        "uat",
+        "requirements",
+        "stakeholder",
+        "regulated data",
+        "root cause",
+    ]
+    return min(100, len(find_matches(text, value_terms)) * 9)
+
+
+def calculate_role_level_score(job):
+    if has_senior_leadership_title(job):
+        return 10
+    if has_senior_title_flag(job):
+        return 30
+    if has_junior_friendly_title(job):
+        return 92
+    if has_senior_experience_wording(job):
+        return 55
+    return 72
+
+
+def calculate_desirable_gap_penalty(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}".lower()
+    penalty = 18 if has_senior_experience_wording(job) else 0
+    finance_control_terms = ["budgeting", "forecasting", "accrual", "accruals", "financial control", "variance analysis"]
+    if len(find_matches(text, finance_control_terms)) >= 3:
+        penalty += 16
+    if len(find_matches(text, ["litigation", "ombudsman", "complaint", "complaints", "case management"])) >= 2:
+        penalty += 10
+    if "degree classification" in text or "2:1" in text or "2.1" in text:
+        penalty += 8
+    return min(45, penalty)
+
+
+def has_finance_control_gap(job):
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}".lower()
+    finance_control_terms = ["budgeting", "forecasting", "accrual", "accruals", "financial control", "variance analysis", "cost tracking"]
+    return "business analyst" in text and len(find_matches(text, finance_control_terms)) >= 3
+
+
+def add_component_scores(jobs):
+    jobs = jobs.copy()
+    jobs["role_family"] = jobs.apply(classify_role_family, axis=1)
+    jobs["location_tier"] = jobs.apply(get_location_tier, axis=1)
+    jobs["estimated_commute_category"] = jobs["location_tier"]
+    jobs["remote_hybrid_onsite"] = jobs.apply(get_remote_hybrid_onsite, axis=1)
+    jobs["required_office_days"] = jobs["job_text"].astype(str).str.extract(
+        r"(?i)\b((?:one|two|three|four|five|1|2|3|4|5)\s+days?(?:\s+a\s+week|\s+per\s+week)?)\b",
+        expand=False,
+    ).fillna("")
+    jobs["salary_disclosed"] = jobs["salary"].astype(str).str.strip().ne("")
+    jobs["salary_min"] = jobs["salary"].apply(lambda value: min(salary_values_from_text(value) or [0]))
+    jobs["salary_max"] = jobs.apply(get_salary_max, axis=1)
+    jobs["local_salary_assessment"] = jobs.apply(
+        lambda job: (
+            "Unknown salary"
+            if not get_salary_max(job)
+            else "Strong local salary"
+            if get_location_fit_score(job) >= 82 and get_salary_max(job) >= 30000
+            else "Acceptable local salary"
+            if get_location_fit_score(job) >= 82 and get_salary_max(job) >= 27000
+            else "Low salary review"
+            if get_salary_max(job) < 27000
+            else "Salary review"
+        ),
+        axis=1,
+    )
+    jobs["eligibility_score"] = jobs.apply(lambda job: 25 if get_hard_skip_reason(job) else 90, axis=1)
+    jobs["title_role_family_score"] = jobs.apply(calculate_title_role_family_score, axis=1)
+    jobs["technical_match_score"] = jobs.apply(calculate_technical_match_score, axis=1)
+    jobs["direct_experience_score"] = jobs.apply(calculate_direct_experience_score, axis=1)
+    jobs["transferable_experience_score"] = jobs.apply(calculate_transferable_experience_score, axis=1)
+    jobs["industry_relevance_score"] = jobs["transferable_experience_score"].clip(upper=85)
+    jobs["education_score"] = jobs.apply(
+        lambda job: 80 if find_matches(f"{job.get('job_title', '')}\n{job.get('job_text', '')}", ["graduate", "degree", "economics", "finance"]) else 55,
+        axis=1,
+    )
+    jobs["location_score"] = jobs.apply(get_location_fit_score, axis=1)
+    jobs["commute_score"] = jobs["location_score"]
+    jobs["remote_hybrid_score"] = jobs["remote_hybrid_onsite"].map({"Remote": 90, "Hybrid": 80, "On-site": 60}).fillna(55)
+    jobs["salary_score"] = jobs.apply(calculate_salary_score, axis=1)
+    jobs["role_level_score"] = jobs.apply(calculate_role_level_score, axis=1)
+    jobs["career_value_score"] = jobs.apply(calculate_career_value_score, axis=1)
+    jobs["employer_value_score"] = jobs.apply(lambda job: 75 if str(job.get("company", "")).strip().lower() not in ["", "unknown"] else 45, axis=1)
+    jobs["contract_stability_score"] = jobs.apply(lambda job: 45 if is_contract_or_temporary_role(job) else 85, axis=1)
+    jobs["mandatory_gap_penalty"] = jobs.apply(lambda job: 60 if get_hard_skip_reason(job) else 0, axis=1)
+    jobs["desirable_gap_penalty"] = jobs.apply(calculate_desirable_gap_penalty, axis=1)
+    jobs["gap_penalty"] = jobs["mandatory_gap_penalty"] + jobs["desirable_gap_penalty"]
+    jobs["final_score"] = (
+        jobs["eligibility_score"] * 0.14
+        + jobs["title_role_family_score"] * 0.16
+        + jobs["technical_match_score"] * 0.16
+        + jobs["direct_experience_score"] * 0.10
+        + jobs["transferable_experience_score"] * 0.10
+        + jobs["location_score"] * 0.13
+        + jobs["salary_score"] * 0.07
+        + jobs["career_value_score"] * 0.10
+        + jobs["role_level_score"] * 0.04
+        - jobs["gap_penalty"] * 0.20
+    ).round().clip(lower=0, upper=100).astype(int)
+    jobs["recommendation"] = jobs.apply(get_component_recommendation, axis=1)
+    jobs["recommendation_reason"] = jobs.apply(get_component_recommendation_reason, axis=1)
+    jobs["fallback_score"] = jobs["final_score"]
+    jobs["deterministic_fallback_used"] = False
+    return jobs
+
+
+def get_component_recommendation(job):
+    if get_hard_skip_reason(job):
+        return "SKIP"
+    final_score = int(pd.to_numeric(job.get("final_score", 0), errors="coerce") or 0)
+    if has_finance_control_gap(job):
+        return "MANUAL REVIEW" if final_score >= 58 else "STRETCH"
+    if str(job.get("local_salary_assessment", "")) == "Low salary review" and final_score >= 55:
+        return "LOW SALARY REVIEW"
+    if final_score >= 74 and get_location_fit_score(job) >= 82:
+        return "APPLY"
+    if final_score >= 66 or (final_score >= 64 and get_location_fit_score(job) >= 82 and str(job.get("role_family", "")) == "Data and BI"):
+        return "HIGH-PRIORITY MANUAL REVIEW"
+    if final_score >= 55:
+        return "MANUAL REVIEW"
+    if final_score >= 45:
+        return "STRETCH"
+    return "SKIP"
+
+
+def get_component_recommendation_reason(job):
+    parts = []
+    if str(job.get("recommendation", "")) == "APPLY":
+        parts.append("strong overall fit")
+    if get_location_fit_score(job) >= 82:
+        parts.append(f"{job.get('location_tier', '')} location")
+    if pd.to_numeric(job.get("technical_match_score", 0), errors="coerce") >= 60:
+        parts.append("strong technical/reporting evidence")
+    if pd.to_numeric(job.get("transferable_experience_score", 0), errors="coerce") >= 35:
+        parts.append("transferable experience is relevant")
+    if str(job.get("local_salary_assessment", "")) == "Unknown salary":
+        parts.append("salary undisclosed, not treated as rejection")
+    if has_senior_experience_wording(job):
+        parts.append("experience wording needs review")
+    if has_finance_control_gap(job):
+        parts.append("finance-control gaps need review")
+    if is_contract_or_temporary_role(job):
+        parts.append("contract/FTC status needs review")
+    return "; ".join(part for part in parts if part) or "component scoring completed"
 
 
 def calculate_apply_priority_score(job):
@@ -1525,8 +2098,8 @@ def get_manual_pre_ai_exclusion(job):
     if bool(job.get("tracker_exact_match", False)) and bool(job.get("previously_seen", False)) and has_strong_exact_tracker_evidence(job):
         status = standardise_status(job.get("status", ""))
         return "Exact tracker exclusion", f"exact tracker match already exists as {status or 'existing tracker row'}"
-    if is_contract_or_temporary_role(job):
-        return "Contract / FTC skipped", "contract/FTC/temporary/day-rate role"
+    if has_day_rate_salary(job):
+        return "Contract / FTC skipped", "day-rate/IR35 style contract role"
     if has_senior_leadership_title(job):
         return "Senior leadership skipped", "senior leadership title"
     if is_clearly_non_target_manual_role(job):
@@ -1575,7 +2148,7 @@ def get_hard_skip_reason(job):
 
     if "training programme / not a normal job" in red_flags or has_training_programme_flag(job):
         return "training course / career package"
-    if is_contract_or_temporary_role(job):
+    if is_api_job(job) and is_contract_or_temporary_role(job):
         return "contract/FTC/temporary/day-rate role"
     if "senior / lead / manager / head of" in red_flags:
         return "senior / lead / manager / head of title"
@@ -1629,6 +2202,25 @@ def is_low_friction_apply_method(job):
     source = str(job.get("source", "")).lower()
     apply_link = str(job.get("apply_link", "")).lower()
     return "indeed" in source and "indeed." in apply_link
+
+
+def get_apply_method(job):
+    searchable_text = "\n".join(
+        str(job.get(field, ""))
+        for field in ["source", "apply_link", "manual_parse_notes", "job_text", "job_description"]
+    ).lower()
+    if "linkedin easy apply" in searchable_text:
+        return "LinkedIn Easy Apply"
+    if "indeed apply" in searchable_text or "indeed application" in searchable_text or "apply with your indeed" in searchable_text:
+        return "Indeed Apply"
+    if "easy apply" in searchable_text:
+        return "Easy Apply"
+    if "quick apply" in searchable_text:
+        return "Quick Apply"
+    source = str(job.get("source", "")).strip()
+    if source:
+        return source
+    return "Unknown"
 
 
 def has_quick_apply_senior_title(job):
@@ -2019,10 +2611,23 @@ def add_category_score(score, reasons, category, points, matches):
     return score
 
 
-def find_best_recommendation_rule(job_title, job_description):
-    """Find the best recommendation rule using title first, then description."""
+def normalize_application_category(value):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    if text in APPLICATION_MATERIALS:
+        return text
+    alias_text = str(value or "").strip().lower()
+    if alias_text in APPLICATION_CATEGORY_ALIASES:
+        return APPLICATION_CATEGORY_ALIASES[alias_text]
+    return ""
+
+
+def find_best_recommendation_rule(job_title, job_description, company=""):
+    """Find the best application material rule using title/company first, then description."""
     title = str(job_title).lower()
     description = str(job_description).lower()
+    company_text = str(company).lower()
+    combined_context = f"{title}\n{company_text}\n{description}"
 
     # Use the job title first because it is usually the strongest signal.
     for rule in RECOMMENDATION_RULES:
@@ -2031,12 +2636,18 @@ def find_best_recommendation_rule(job_title, job_description):
             reason = f"title matched {rule['role_type']}: {', '.join(matches)}"
             return rule, reason
 
+    for rule in RECOMMENDATION_RULES:
+        matches = find_matches(f"{company_text}\n{description}", rule["description_keywords"])
+        if matches and rule["category"] == "business_intelligence_officer":
+            reason = f"company/description matched {rule['role_type']}: {', '.join(matches[:5])}"
+            return rule, reason
+
     # If the title is unclear, use description keywords as a fallback.
     best_rule = None
     best_matches = []
 
     for rule in RECOMMENDATION_RULES:
-        matches = find_matches(description, rule["description_keywords"])
+        matches = find_matches(combined_context, rule["description_keywords"])
         if len(matches) > len(best_matches):
             best_rule = rule
             best_matches = matches
@@ -2045,25 +2656,74 @@ def find_best_recommendation_rule(job_title, job_description):
         reason = f"description matched {best_rule['role_type']}: {', '.join(best_matches[:5])}"
         return best_rule, reason
 
-    # Default to a generic analyst cover letter and the general data analyst CV.
-    default_rule = {
-        "role_type": "generic analyst",
-        "cv": "cvs/cv_data_analyst.pdf",
-        "cover_letter": "cover_letters/cover_generic_analyst.docx",
+    default_rule = {"category": "data_analyst", "role_type": "data analyst"}
+    return default_rule, "default: data analyst ATS application pack"
+
+
+def material_files_for_category(category):
+    category = normalize_application_category(category) or "data_analyst"
+    material = APPLICATION_MATERIALS[category]
+    return material["cv"], material["cover_letter"]
+
+
+def get_application_material_category(job_title, job_description, company="", ai_category=""):
+    ai_category = normalize_application_category(ai_category)
+    if ai_category:
+        return ai_category, f"AI category selected: {ai_category}"
+    rule, reason = find_best_recommendation_rule(job_title, job_description, company)
+    return rule["category"], reason
+
+
+def check_application_pack_files(recommended_cv, recommended_cover_letter):
+    missing = []
+    if not (PROJECT_ROOT / "cvs" / str(recommended_cv)).exists():
+        missing.append(f"missing CV: cvs/{recommended_cv}")
+    if not (PROJECT_ROOT / "cover_letters" / str(recommended_cover_letter)).exists():
+        missing.append(f"missing cover letter: cover_letters/{recommended_cover_letter}")
+    return not missing, "; ".join(missing)
+
+
+def recommend_application_materials(job):
+    ai_cv_category = job.get("cv_category", "") or job.get("ai_cv_category", "")
+    ai_cover_category = job.get("cover_letter_category", "") or job.get("ai_cover_letter_category", "")
+    cv_category, cv_reason = get_application_material_category(
+        job.get("job_title", ""),
+        job.get("job_text", "") or job.get("job_description", ""),
+        job.get("company", ""),
+        ai_cv_category,
+    )
+    cover_letter_category = normalize_application_category(ai_cover_category) or cv_category
+    if normalize_application_category(ai_cover_category):
+        cover_reason = f"AI category selected: {cover_letter_category}"
+    else:
+        cover_reason = cv_reason
+    recommended_cv, _unused_cover = material_files_for_category(cv_category)
+    _unused_cv, recommended_cover_letter = material_files_for_category(cover_letter_category)
+    pack_ready, missing_warning = check_application_pack_files(recommended_cv, recommended_cover_letter)
+    return {
+        "recommended_cv": recommended_cv,
+        "recommended_cover_letter": recommended_cover_letter,
+        "cv_category": cv_category,
+        "cover_letter_category": cover_letter_category,
+        "application_pack_ready": bool(pack_ready),
+        "missing_application_file_warning": missing_warning,
+        "reason_for_cv_choice": cv_reason,
+        "reason_for_cover_letter_choice": cover_reason,
     }
-    return default_rule, "default: generic analyst recommendation"
 
 
 def recommend_cv(job_title, job_description):
     """Recommend the best CV version for a job."""
-    rule, reason = find_best_recommendation_rule(job_title, job_description)
-    return rule["cv"], reason
+    category, reason = get_application_material_category(job_title, job_description)
+    cv, _cover = material_files_for_category(category)
+    return cv, reason
 
 
 def recommend_cover_letter(job_title, job_description):
     """Recommend the best cover letter template for a job."""
-    rule, reason = find_best_recommendation_rule(job_title, job_description)
-    return rule["cover_letter"], reason
+    category, reason = get_application_material_category(job_title, job_description)
+    _cv, cover_letter = material_files_for_category(category)
+    return cover_letter, reason
 
 
 def recommend_apply_action(score):
@@ -2892,6 +3552,9 @@ def add_duplicate_metadata(jobs):
 
     duplicate_counts = jobs.groupby("dedupe_key")["dedupe_key"].transform("count")
     jobs["duplicate_count"] = duplicate_counts
+    first_file_by_key = jobs.groupby("dedupe_key")["file_name"].transform("first")
+    jobs["duplicate_of"] = jobs["file_name"].where(duplicate_counts <= 1, first_file_by_key)
+    jobs.loc[jobs["duplicate_of"].eq(jobs["file_name"]), "duplicate_of"] = ""
 
     merged_sources = jobs.groupby("dedupe_key")["source"].transform(
         lambda sources: "|".join(sorted(set(str(source) for source in sources if str(source).strip())))
@@ -2984,6 +3647,48 @@ def apply_ai_decisions_to_final_action(jobs):
     return jobs
 
 
+def apply_manual_component_fallback(jobs):
+    """Keep strong/uncertain manual roles visible when AI is missing or overly conservative."""
+    jobs = jobs.copy()
+    manual_mask = jobs.apply(is_manual_job, axis=1)
+    hard_skip_mask = jobs["hard_skip_reason"].astype(str).str.strip().ne("")
+    if "deterministic_fallback_used" not in jobs.columns:
+        jobs["deterministic_fallback_used"] = False
+
+    strong_apply_mask = (
+        manual_mask
+        & ~hard_skip_mask
+        & jobs["recommendation"].eq("APPLY")
+        & jobs["final_action"].isin(["Skip", "Low Priority", "Pending AI Review", "Manual Review"])
+    )
+    jobs.loc[strong_apply_mask, "final_action"] = "Apply If Time"
+    jobs.loc[strong_apply_mask, "final_action_reason"] = jobs.loc[strong_apply_mask].apply(
+        lambda job: append_text_flag(
+            job.get("final_action_reason", ""),
+            f"deterministic fallback: {job.get('recommendation_reason', '')}",
+        ),
+        axis=1,
+    )
+    jobs.loc[strong_apply_mask, "deterministic_fallback_used"] = True
+
+    review_mask = (
+        manual_mask
+        & ~hard_skip_mask
+        & jobs["recommendation"].isin(["HIGH-PRIORITY MANUAL REVIEW", "MANUAL REVIEW", "STRETCH", "LOW SALARY REVIEW"])
+        & jobs["final_action"].isin(["Skip", "Low Priority", "Pending AI Review"])
+    )
+    jobs.loc[review_mask, "final_action"] = "Manual Review"
+    jobs.loc[review_mask, "final_action_reason"] = jobs.loc[review_mask].apply(
+        lambda job: append_text_flag(
+            job.get("final_action_reason", ""),
+            f"deterministic fallback: {job.get('recommendation')} - {job.get('recommendation_reason', '')}",
+        ),
+        axis=1,
+    )
+    jobs.loc[review_mask, "deterministic_fallback_used"] = True
+    return jobs
+
+
 def add_manual_duplicate_metadata(jobs):
     jobs = jobs.copy()
     manual_mask = jobs["input_type"].astype(str).str.lower().eq("manual")
@@ -3024,7 +3729,7 @@ def get_ranked_jobs_exclusion_reason(job, included_indexes=None, deduped_indexes
         reasons.append("not a manual raw job")
     if str(job.get("final_action", "")) not in allowed_actions:
         reasons.append("final_action is not a ranked_jobs action")
-    if not has_valid_ai_decision(job):
+    if not has_valid_ai_decision(job) and not bool(job.get("deterministic_fallback_used", False)):
         reasons.append("missing valid AI decision")
     if not is_actionable_status(job):
         reasons.append(f"tracker status is {standardise_status(job.get('status', ''))}")
@@ -4127,11 +4832,13 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
 
     # Add practical review guidance without changing the score itself.
     jobs["red_flags"] = jobs.apply(detect_red_flags, axis=1)
-    contract_mask = jobs["red_flags"].astype(str).str.contains(
+    contract_signal_mask = jobs["red_flags"].astype(str).str.contains(
         "contract/temporary role - user prefers permanent roles",
         regex=False,
         na=False,
     )
+    manual_contract_mask = contract_signal_mask & jobs["input_type"].astype(str).str.lower().eq("manual")
+    contract_mask = contract_signal_mask & ~jobs["input_type"].astype(str).str.lower().eq("manual")
     high_salary_mask = jobs["red_flags"].astype(str).str.contains(
         "high salary suggests mid/senior level",
         regex=False,
@@ -4151,6 +4858,11 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     )
     jobs.loc[contract_mask, "apply_recommendation"] = "Skip"
     jobs.loc[contract_mask, "apply_reason"] = "contract/temporary role - user prefers permanent roles"
+    jobs.loc[manual_contract_mask, "reason"] = jobs.loc[manual_contract_mask, "reason"].apply(
+        lambda reason: f"{reason}; contract/FTC status needs manual review"
+    )
+    jobs.loc[manual_contract_mask, "apply_recommendation"] = "Manual review"
+    jobs.loc[manual_contract_mask, "apply_reason"] = "contract/FTC status needs manual review, not automatic rejection"
 
     jobs.loc[high_salary_mask, "reason"] = jobs.loc[high_salary_mask, "reason"].apply(
         lambda reason: f"{reason}; high salary suggests role may be above junior level"
@@ -4189,6 +4901,8 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     jobs["priority_reason"] = next_action_results.apply(lambda result: result[1])
     jobs.loc[contract_mask, "next_action"] = "Skip"
     jobs.loc[contract_mask, "priority_reason"] = "contract/temporary role - user prefers permanent roles"
+    jobs.loc[manual_contract_mask, "next_action"] = "Review manually"
+    jobs.loc[manual_contract_mask, "priority_reason"] = "contract/FTC status needs review"
     jobs.loc[salary_60_mask, "next_action"] = "Skip"
     jobs.loc[salary_60_mask, "priority_reason"] = "salary level suggests senior/mid-level role"
     jobs.loc[salary_55_mask & ~salary_60_mask, "next_action"] = "Review manually"
@@ -4203,27 +4917,20 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     jobs["application_tier"] = jobs["application_priority"]
     jobs.loc[contract_mask, "application_priority"] = "Tier 4 = Skip"
     jobs.loc[contract_mask, "application_tier"] = "Skip"
+    jobs.loc[manual_contract_mask, "application_priority"] = "Manual Review"
+    jobs.loc[manual_contract_mask, "application_tier"] = "Manual Review"
     jobs.loc[salary_55_mask & ~salary_60_mask, "application_priority"] = "Tier 4 = Low Priority"
     jobs.loc[salary_55_mask & ~salary_60_mask, "application_tier"] = "Tier 4 = Low Priority"
     jobs.loc[salary_60_mask, "application_priority"] = "Tier 4 = Skip"
     jobs.loc[salary_60_mask, "application_tier"] = "Skip"
     jobs["estimated_interview_probability"] = jobs.apply(estimate_interview_probability, axis=1)
 
-    # Recommend which CV version to use for each job.
-    cv_results = jobs.apply(
-        lambda job: recommend_cv(job["job_title"], job["job_text"]),
-        axis=1,
-    )
-    jobs["recommended_cv"] = cv_results.apply(lambda result: result[0])
-    jobs["cv_reason"] = cv_results.apply(lambda result: result[1])
-
-    # Recommend which cover letter template to use for each job.
-    cover_letter_results = jobs.apply(
-        lambda job: recommend_cover_letter(job["job_title"], job["job_text"]),
-        axis=1,
-    )
-    jobs["recommended_cover_letter"] = cover_letter_results.apply(lambda result: result[0])
-    jobs["cover_letter_reason"] = cover_letter_results.apply(lambda result: result[1])
+    # Recommend the local ATS application pack without copying private files.
+    application_materials = pd.DataFrame(list(jobs.apply(recommend_application_materials, axis=1)), index=jobs.index)
+    for column in application_materials.columns:
+        jobs[column] = application_materials[column]
+    jobs["cv_reason"] = jobs["reason_for_cv_choice"]
+    jobs["cover_letter_reason"] = jobs["reason_for_cover_letter_choice"]
 
     # Add duplicate metadata before creating the daily review file. The full
     # audit file still keeps every row, including duplicates and score 0 jobs.
@@ -4262,6 +4969,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     ranked_jobs["needs_human_review"] = ranked_jobs.apply(needs_human_review, axis=1)
     ranked_jobs["human_review_reason"] = ranked_jobs.apply(get_human_review_reason, axis=1)
     ranked_jobs["location_fit_score"] = ranked_jobs.apply(get_location_fit_score, axis=1)
+    ranked_jobs = add_component_scores(ranked_jobs)
     ranked_jobs = apply_repost_candidate_annotations(ranked_jobs)
     ranked_jobs["pre_ai_bucket"] = ranked_jobs.apply(get_pre_ai_bucket, axis=1)
     ranked_jobs["pre_ai_reason"] = ranked_jobs.apply(get_pre_ai_reason, axis=1)
@@ -4282,6 +4990,13 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     else:
         ranked_jobs = apply_ai_reviews(ranked_jobs, enabled=ai_review)
     ranked_jobs = apply_ai_decisions_to_final_action(ranked_jobs)
+    ranked_jobs = add_component_scores(ranked_jobs)
+    ranked_jobs = apply_manual_component_fallback(ranked_jobs)
+    application_materials = pd.DataFrame(list(ranked_jobs.apply(recommend_application_materials, axis=1)), index=ranked_jobs.index)
+    for column in application_materials.columns:
+        ranked_jobs[column] = application_materials[column]
+    ranked_jobs["cv_reason"] = ranked_jobs["reason_for_cv_choice"]
+    ranked_jobs["cover_letter_reason"] = ranked_jobs["reason_for_cover_letter_choice"]
     ranked_jobs["needs_human_review"] = ranked_jobs.apply(needs_human_review, axis=1)
     ranked_jobs["human_review_reason"] = ranked_jobs.apply(get_human_review_reason, axis=1)
     review_apply_today_mask = ranked_jobs["needs_human_review"].eq(True) & ranked_jobs["final_action"].eq("Apply Today")
@@ -4292,6 +5007,13 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     )
     ranked_jobs["would_send_to_ai"] = ranked_jobs.apply(would_send_to_ai, axis=1)
     ranked_jobs["ai_review_priority_score"] = ranked_jobs.apply(calculate_ai_review_priority_score, axis=1)
+    ranked_jobs["ai_review_attempted"] = ranked_jobs["ai_review_source"].astype(str).str.strip().ne("rule_based")
+    ranked_jobs["ai_review_success"] = ranked_jobs.apply(has_valid_ai_result, axis=1)
+    ranked_jobs["ai_review_error"] = ranked_jobs["ai_red_flags"].astype(str).where(
+        ranked_jobs["ai_review_success"].eq(False),
+        "",
+    )
+    ranked_jobs["ai_raw_recommendation"] = ranked_jobs["ai_final_action"]
 
     ranked_jobs["action_bucket"] = ranked_jobs["final_action"]
     ranked_jobs["action_reason"] = ranked_jobs["final_action_reason"]
@@ -4322,6 +5044,19 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     ranked_jobs["final_action_sort"] = ranked_jobs["final_action"].apply(get_action_bucket_rank)
     ranked_jobs["date_added_sort"] = pd.to_datetime(ranked_jobs["date_added"], errors="coerce").fillna(pd.Timestamp.min)
     ranked_jobs["quick_apply_candidate"] = ranked_jobs.apply(is_quick_apply_candidate, axis=1)
+    ranked_jobs["apply_method"] = ranked_jobs.apply(get_apply_method, axis=1)
+    ranked_jobs["normalised_title"] = ranked_jobs["job_title"].apply(normalize_title_for_match)
+    for column, default in [
+        ("source_file", ""),
+        ("raw_file_path", ""),
+        ("file_encoding", ""),
+        ("job_blocks_detected", ""),
+        ("raw_job_id", ""),
+        ("parsed_successfully", ""),
+        ("parser_warning", ""),
+    ]:
+        if column not in ranked_jobs.columns:
+            ranked_jobs[column] = default
     ranked_jobs = ranked_jobs.sort_values(
         by=["final_action_sort", "apply_priority_score", "date_added_sort", "location_fit_score", "score"],
         ascending=[True, False, False, False, False],
@@ -4331,15 +5066,42 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     output_columns = [
         "input_type",
         "file_name",
+        "source_file",
+        "raw_file_path",
+        "file_encoding",
+        "job_blocks_detected",
+        "raw_job_id",
+        "parsed_successfully",
+        "parser_warning",
         "date_added",
         "source",
         "dedupe_key",
         "merged_sources",
         "duplicate_count",
+        "duplicate_of",
         "job_title",
+        "normalised_title",
+        "role_family",
         "company",
         "location",
+        "recommended_cv",
+        "recommended_cover_letter",
+        "cv_category",
+        "cover_letter_category",
+        "application_pack_ready",
+        "missing_application_file_warning",
+        "reason_for_cv_choice",
+        "reason_for_cover_letter_choice",
+        "apply_method",
+        "location_tier",
+        "estimated_commute_category",
+        "remote_hybrid_onsite",
+        "required_office_days",
         "salary",
+        "salary_min",
+        "salary_max",
+        "salary_disclosed",
+        "local_salary_assessment",
         "manual_parse_confidence",
         "manual_parse_notes",
         "job_posted_date",
@@ -4361,6 +5123,28 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "needs_human_review",
         "human_review_reason",
         "location_fit_score",
+        "eligibility_score",
+        "title_role_family_score",
+        "technical_match_score",
+        "direct_experience_score",
+        "transferable_experience_score",
+        "industry_relevance_score",
+        "education_score",
+        "location_score",
+        "commute_score",
+        "remote_hybrid_score",
+        "salary_score",
+        "role_level_score",
+        "career_value_score",
+        "employer_value_score",
+        "contract_stability_score",
+        "mandatory_gap_penalty",
+        "desirable_gap_penalty",
+        "gap_penalty",
+        "fallback_score",
+        "final_score",
+        "recommendation",
+        "recommendation_reason",
         "ai_final_action",
         "ai_fit_score",
         "ai_fit_score_raw",
@@ -4370,6 +5154,11 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "ai_review_source",
         "source_priority",
         "ai_review_priority_reason",
+        "ai_review_attempted",
+        "ai_review_success",
+        "ai_review_error",
+        "ai_raw_recommendation",
+        "deterministic_fallback_used",
         "action_bucket",
         "action_reason",
         "reason",
@@ -4387,9 +5176,7 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "estimated_interview_probability",
         "apply_recommendation",
         "apply_reason",
-        "recommended_cv",
         "cv_reason",
-        "recommended_cover_letter",
         "cover_letter_reason",
         "status",
         "matched_tracker_file",
@@ -4417,7 +5204,10 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     allowed_daily_actions = ["Apply Today", "Strong Consider", "Apply If Time"] if STRICT_MODE else ["Apply Today", "Strong Consider", "Apply If Time", "Consider", "Low Priority"]
     ranked_jobs_include_mask = (
         deduped_ranked_jobs.apply(is_manual_job, axis=1)
-        & deduped_ranked_jobs.apply(has_valid_ai_decision, axis=1)
+        & (
+            deduped_ranked_jobs.apply(has_valid_ai_decision, axis=1)
+            | deduped_ranked_jobs["deterministic_fallback_used"].eq(True)
+        )
         & deduped_ranked_jobs.apply(is_actionable_status, axis=1)
         & deduped_ranked_jobs["final_action"].isin(allowed_daily_actions)
         & (deduped_ranked_jobs["previously_seen"] != True)
@@ -4430,6 +5220,27 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         & deduped_ranked_jobs.apply(should_show_cache_invalid_rule_fallback, axis=1)
     )
     shown_ranked_jobs = deduped_ranked_jobs[ranked_jobs_include_mask][output_columns]
+    application_pack_columns = [
+        "file_name",
+        "job_title",
+        "company",
+        "location",
+        "final_action",
+        "ai_fit_score",
+        "apply_method",
+        "apply_link",
+        "recommended_cv",
+        "recommended_cover_letter",
+        "cv_category",
+        "cover_letter_category",
+        "application_pack_ready",
+        "missing_application_file_warning",
+        "reason_for_cv_choice",
+        "reason_for_cover_letter_choice",
+    ]
+    application_pack_recommendations = shown_ranked_jobs[
+        shown_ranked_jobs["final_action"].isin(["Apply Today", "Strong Consider", "Apply If Time"])
+    ][application_pack_columns]
     quick_apply_candidates = ranked_jobs[ranked_jobs.apply(is_quick_apply_output_candidate, axis=1)].copy()
     quick_apply_candidates["_quick_apply_score_sort"] = pd.to_numeric(
         quick_apply_candidates["ai_fit_score_normalized"], errors="coerce"
@@ -4466,6 +5277,92 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         by=["source_priority", "ai_review_priority_score", "date_added_sort", "apply_priority_score"],
         ascending=[True, False, False, False],
     )[output_columns]
+    ranked_output_files = set(shown_ranked_jobs["file_name"].astype(str))
+    queue_output_files = set(ai_review_queue[ai_review_queue["input_type"].astype(str).str.lower().eq("manual")]["file_name"].astype(str))
+    included_indexes = set(shown_ranked_jobs.index)
+    deduped_indexes = set(deduped_ranked_jobs.index)
+    manual_trace_base = ranked_jobs[ranked_jobs.apply(is_manual_job, axis=1)].copy()
+    manual_parse_error_mask = manual_trace_base["parsed_successfully"].astype(str).str.lower().isin(["false", "0", "no"])
+    manual_duplicate_mask = pd.to_numeric(manual_trace_base["duplicate_count"], errors="coerce").fillna(1).gt(1) & ~manual_trace_base["file_name"].astype(str).isin(ranked_output_files)
+
+    def manual_export_destination(job):
+        file_name = str(job.get("file_name", ""))
+        if file_name in ranked_output_files:
+            return "ranked_jobs.xlsx"
+        if str(job.get("parsed_successfully", "")).strip().lower() in ["false", "0", "no"]:
+            return "parsing_errors.xlsx"
+        if pd.to_numeric(job.get("duplicate_count", 1), errors="coerce") > 1 and file_name not in ranked_output_files:
+            return "duplicates.xlsx"
+        if file_name in queue_output_files:
+            return "ai_review_queue.xlsx"
+        return "filtered_jobs.xlsx"
+
+    manual_trace_base["export_destination"] = manual_trace_base.apply(manual_export_destination, axis=1)
+    manual_trace_base["export_status"] = manual_trace_base["export_destination"].apply(
+        lambda destination: "ranked" if destination == "ranked_jobs.xlsx" else "audited"
+    )
+    manual_trace_base["reason_not_in_ranked_jobs"] = manual_trace_base.apply(
+        lambda job: "" if str(job.get("file_name", "")) in ranked_output_files else get_ranked_jobs_exclusion_reason(
+            job,
+            included_indexes=included_indexes,
+            deduped_indexes=deduped_indexes,
+            allowed_actions=allowed_daily_actions,
+        ),
+        axis=1,
+    )
+    manual_trace_base["active_status_reason"] = manual_trace_base.apply(
+        lambda job: "tracker/status marks closed or expired"
+        if standardise_status(job.get("status", "")) in ["expired", "closed"]
+        else "no definite inactive evidence",
+        axis=1,
+    )
+    manual_trace_base["is_active"] = ~manual_trace_base["status"].apply(standardise_status).isin(["expired", "closed"])
+    raw_job_trace_audit = manual_trace_base[
+        [
+            "file_name",
+            "source_file",
+            "raw_file_path",
+            "source",
+            "file_encoding",
+            "job_blocks_detected",
+            "raw_job_id",
+            "job_title",
+            "company",
+            "location",
+            "job_description",
+            "apply_link",
+            "contract_type",
+            "salary",
+            "salary_disclosed",
+            "application_deadline",
+            "deadline_confidence",
+            "job_posted_date",
+            "is_active",
+            "active_status_reason",
+            "duplicate_count",
+            "duplicate_of",
+            "hard_skip_reason",
+            "score",
+            "ai_review_attempted",
+            "ai_review_success",
+            "ai_fit_score",
+            "ai_review_error",
+            "fallback_score",
+            "final_score",
+            "recommendation",
+            "recommendation_reason",
+            "final_action",
+            "final_action_reason",
+            "export_status",
+            "export_destination",
+            "reason_not_in_ranked_jobs",
+        ]
+    ]
+    parsing_errors = manual_trace_base[manual_parse_error_mask][output_columns + ["export_destination", "reason_not_in_ranked_jobs"]]
+    duplicates_audit = manual_trace_base[manual_duplicate_mask][output_columns + ["export_destination", "reason_not_in_ranked_jobs"]]
+    filtered_jobs = manual_trace_base[
+        manual_trace_base["export_destination"].eq("filtered_jobs.xlsx")
+    ][output_columns + ["export_destination", "reason_not_in_ranked_jobs"]]
     manual_rows = ranked_jobs[ranked_jobs.apply(is_manual_job, axis=1)].copy()
     manual_queue_files = set(ai_review_queue[ai_review_queue["input_type"].astype(str).str.lower().eq("manual")]["file_name"].astype(str))
     tracker_exact_exclusions = int((ranked_jobs["tracker_exact_match"].eq(True) & ranked_jobs["previously_seen"].eq(True)).sum())
@@ -4558,6 +5455,11 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         ai_review_queue.to_excel(AI_REVIEW_QUEUE_FILE, index=False)
         api_leads.to_excel(API_LEADS_FILE, index=False)
         quick_apply_jobs.to_excel(QUICK_APPLY_JOBS_FILE, index=False)
+        application_pack_recommendations.to_excel(APPLICATION_PACK_RECOMMENDATIONS_FILE, index=False)
+        raw_job_trace_audit.to_excel(RAW_JOB_TRACE_AUDIT_FILE, index=False)
+        filtered_jobs.to_excel(FILTERED_JOBS_FILE, index=False)
+        duplicates_audit.to_excel(DUPLICATES_FILE, index=False)
+        parsing_errors.to_excel(PARSING_ERRORS_FILE, index=False)
         repost_tracker_audit.to_excel(REPOST_TRACKER_AUDIT_FILE, index=False)
         save_pipeline_debug_audit(PIPELINE_DEBUG_AUDIT_FILE, pipeline_debug_audit)
         if ai_review == "batch":
@@ -4567,7 +5469,9 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         print(
             f"Could not save {OUTPUT_FILE}, {ALL_OUTPUT_FILE}, {AI_REVIEW_QUEUE_FILE}, "
             f"{API_LEADS_FILE}, {RANKED_JOBS_EXCLUSION_AUDIT_FILE}, {MANUAL_AI_COVERAGE_AUDIT_FILE}, "
-            f"{MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}, {QUICK_APPLY_JOBS_FILE}, {PIPELINE_DEBUG_AUDIT_FILE}, "
+            f"{MANUAL_PRE_AI_EXCLUSION_AUDIT_FILE}, {QUICK_APPLY_JOBS_FILE}, {APPLICATION_PACK_RECOMMENDATIONS_FILE}, "
+            f"{PIPELINE_DEBUG_AUDIT_FILE}, "
+            f"{RAW_JOB_TRACE_AUDIT_FILE}, {FILTERED_JOBS_FILE}, {DUPLICATES_FILE}, {PARSING_ERRORS_FILE}, "
             f"or {REPOST_TRACKER_AUDIT_FILE}"
         )
         print("Please close the Excel files if they are open, then run this script again.")
@@ -4621,6 +5525,17 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     )
     ranked_jobs_written = len(shown_ranked_jobs)
     ranked_jobs_excluded = len(ranked_jobs_exclusion_audit)
+    missing_application_pack_rows = application_pack_recommendations[
+        application_pack_recommendations["application_pack_ready"].eq(False)
+    ]
+    missing_application_file_warnings = sorted(
+        {
+            warning.strip()
+            for warning_text in missing_application_pack_rows["missing_application_file_warning"].astype(str)
+            for warning in warning_text.split(";")
+            if warning.strip()
+        }
+    )
 
     print()
     print("Ranking summary:")
@@ -4654,6 +5569,15 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     print(f"Ranked jobs exclusion audit path: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"Quick apply candidates: {len(quick_apply_jobs)}")
     print(f"Quick apply output path: {QUICK_APPLY_JOBS_FILE}")
+    print(f"Application pack recommendations: {len(application_pack_recommendations)}")
+    print(f"Application pack output path: {APPLICATION_PACK_RECOMMENDATIONS_FILE}")
+    print(f"Application pack rows missing files: {len(missing_application_pack_rows)}")
+    for warning in missing_application_file_warnings:
+        print(f"Application pack missing file: {warning}")
+    print(f"Raw job trace audit path: {RAW_JOB_TRACE_AUDIT_FILE}")
+    print(f"Filtered jobs count: {len(filtered_jobs)}")
+    print(f"Duplicates audit count: {len(duplicates_audit)}")
+    print(f"Parsing errors count: {len(parsing_errors)}")
     print(f"ai_review_queue count: {len(ai_review_queue)}")
     print(f"Pipeline debug audit path: {PIPELINE_DEBUG_AUDIT_FILE}")
     print(f"Repost tracker audit path: {REPOST_TRACKER_AUDIT_FILE}")
@@ -4721,6 +5645,11 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
     print(f"Saved ranked jobs to: {OUTPUT_FILE}")
     print(f"Saved ranked jobs exclusion audit to: {RANKED_JOBS_EXCLUSION_AUDIT_FILE}")
     print(f"Saved quick apply jobs to: {QUICK_APPLY_JOBS_FILE}")
+    print(f"Saved application pack recommendations to: {APPLICATION_PACK_RECOMMENDATIONS_FILE}")
+    print(f"Saved raw job trace audit to: {RAW_JOB_TRACE_AUDIT_FILE}")
+    print(f"Saved filtered jobs to: {FILTERED_JOBS_FILE}")
+    print(f"Saved duplicates audit to: {DUPLICATES_FILE}")
+    print(f"Saved parsing errors to: {PARSING_ERRORS_FILE}")
     print(f"Saved AI review queue to: {AI_REVIEW_QUEUE_FILE}")
     print(f"Saved pipeline debug audit to: {PIPELINE_DEBUG_AUDIT_FILE}")
     print(f"Saved repost tracker audit to: {REPOST_TRACKER_AUDIT_FILE}")
@@ -4734,6 +5663,10 @@ def main(ai_review=None, force_manual_review=False, force_files="", force_today=
         "total_jobs_scored": len(all_ranked_jobs),
         "jobs_shown": len(shown_ranked_jobs),
         "quick_apply_jobs": len(quick_apply_jobs),
+        "application_pack_recommendations": len(application_pack_recommendations),
+        "filtered_jobs": len(filtered_jobs),
+        "duplicates": len(duplicates_audit),
+        "parsing_errors": len(parsing_errors),
         "ai_review_queue": len(ai_review_queue),
         "api_leads": len(api_leads),
         "apply_now": int(action_counts.get("Apply now", 0)),

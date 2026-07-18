@@ -25,6 +25,11 @@ The project is intentionally local-first: tracker files, raw job descriptions, O
 - `output/ranked_jobs.xlsx`: main daily action list after ranking and AI review filtering.
 - `output/ranked_jobs_exclusion_audit.xlsx`: audit of manual `Apply Today`, `Strong Consider`, or `Apply If Time` rows that were not written to `ranked_jobs.xlsx`.
 - `output/quick_apply_jobs.xlsx`: optional volume list for low-friction LinkedIn Easy Apply, Indeed Apply, Easy Apply, or quick apply manual jobs.
+- `output/application_pack_recommendations.xlsx`: ranked-action jobs with the recommended ATS CV, ATS cover letter, category, and local file-existence readiness check.
+- `output/raw_job_trace_audit.xlsx`: one-row-per-manual-job trace showing parsing, scoring, AI/fallback status, export destination, and why a row was not in `ranked_jobs.xlsx`.
+- `output/filtered_jobs.xlsx`: valid manual jobs that are not ranked, queued, duplicates, or parsing errors.
+- `output/duplicates.xlsx`: duplicate manual/API rows removed from the daily ranked view, with duplicate evidence.
+- `output/parsing_errors.xlsx`: genuinely unreadable manual raw records. Non-fatal missing salary/date/location/URL issues should stay in normal outputs with parser warnings.
 - `output/ai_review_queue.xlsx`: manual review, borderline, and pending AI review list.
 - `output/api_leads.xlsx`: API discovery leads only. These are not full JD AI review targets by default.
 - `output/all_ranked_jobs.xlsx`: full audit output with every ranked row.
@@ -214,6 +219,10 @@ output/manual_pre_ai_exclusion_audit.xlsx
 - `ranked_jobs.xlsx`: main daily action list.
 - `ranked_jobs_exclusion_audit.xlsx`: explains why any manual `Apply Today`, `Strong Consider`, or `Apply If Time` job was not written to `ranked_jobs.xlsx`.
 - `quick_apply_jobs.xlsx`: optional extra list for low-friction applications. It is for application volume, not the main priority list.
+- `raw_job_trace_audit.xlsx`: source-of-truth trace for every manually pasted active raw job. It records raw file path, encoding, detected job blocks, parsed fields, active status, duplicate/hard-filter status, deterministic scores, AI/fallback status, recommendation, export destination, and why the row was not included in `ranked_jobs.xlsx`.
+- `filtered_jobs.xlsx`: valid manual jobs that are visible but not priority-ranked or queued.
+- `duplicates.xlsx`: rows treated as duplicates; deduplication must never silently delete a row.
+- `parsing_errors.xlsx`: records that could not be read/parsed. Missing salary, dates, URL, or uncertain location are non-fatal parser warnings, not parsing errors.
 - `ai_review_queue.xlsx`: manual review, borderline, and pending review list.
 - `api_leads.xlsx`: API discovery leads only.
 - `all_ranked_jobs.xlsx`: full audit file.
@@ -248,6 +257,40 @@ Low-friction manual jobs get `quick_apply_candidate=True`. `quick_apply_jobs.xls
 `ranked_jobs.xlsx` includes manual jobs with `Apply Today`, `Strong Consider`, and `Apply If Time` when they have a valid AI decision and are not blocked by a clear exclusion such as exact tracker match, hard skip, invalid AI/cache inconsistency, or deduplication. The terminal summary separates overall action counts, which may include API leads, from manual ranked-action counts, which should reconcile with `ranked_jobs.xlsx` plus `ranked_jobs_exclusion_audit.xlsx`.
 
 Manual raw jobs are human-screened before being added, so rule-based filters should be minimal before AI review. AI should decide whether stretch-but-relevant manual jobs become `Apply Today`, `Strong Consider`, `Apply If Time`, `Manual Review`, `Low Priority`, or `Skip`.
+
+Manual raw jobs also receive deterministic component scores so AI failures, missing AI results, malformed AI responses, or low-confidence AI/cache output cannot make a valid job disappear. Component fields include role family, technical match, direct experience, transferable experience, location/commute, salary, career value, role level, gap penalties, final score, recommendation, recommendation reason, and `deterministic_fallback_used`.
+
+Location scoring is intentionally local-first. Milton Keynes and close MK areas receive maximum priority. Bedford, Northampton, Luton, and Brixworth receive very high priority. Nearby drivable towns receive positive scores. London is assessed with commute and office-day caution rather than automatically outranking local roles by salary.
+
+Salary is normally a soft factor. Missing salary is not a rejection. Local analyst roles around `£27,000-£29,999` can remain visible and may still be Apply/Manual Review when technical fit, location, and career value are strong.
+
+Manual fixed-term or contract wording is no longer an automatic pre-AI exclusion by itself. Day-rate/IR35-style roles can still be strict excluded. Other contract/FTC signals should be visible as Manual Review/contract stability risk.
+
+## Application Materials Mapping
+
+The assistant recommends local two-page ATS CV files and matching ATS cover letter files by job category. These files are private application materials in `cvs/` and `cover_letters/`, and both folders are ignored by Git. Do not commit CVs, cover letters, `.docx`, or `.pdf` files.
+
+Application material categories:
+
+- `business_intelligence_officer`: `cv_two_page_business_intelligence_officer.docx` and `cover_letter_business_intelligence_officer_ats.docx`
+- `data_analyst`: `cv_two_page_data_analyst.docx` and `cover_letter_data_analyst_ats.docx`
+- `bi_reporting_mi_analyst`: `cv_two_page_bi_reporting_mi_analyst.docx` and `cover_letter_bi_reporting_mi_analyst_ats.docx`
+- `commercial_analyst`: `cv_two_page_commercial_analyst.docx` and `cover_letter_commercial_analyst_ats.docx`
+- `business_operations_analyst`: `cv_two_page_business_operations_analyst.docx` and `cover_letter_business_operations_analyst_ats.docx`
+- `finance_economics_analyst`: `cv_two_page_finance_economics_analyst.docx` and `cover_letter_finance_economics_analyst_ats.docx`
+
+Mapping logic:
+
+- Business Intelligence Officer, BI Officer, performance/public-sector/council/local-government reporting roles use `business_intelligence_officer`.
+- Data Analyst, Junior Data Analyst, Graduate Data Analyst, and Associate Data Analyst roles use `data_analyst`.
+- BI Analyst, Reporting Analyst, MI Analyst, Power BI Analyst, Dashboard Analyst, and Management Information roles use `bi_reporting_mi_analyst`.
+- Commercial Analyst, Sales Analyst, Pricing Analyst, Revenue Analyst, Customer Insight, and Retail Analyst roles use `commercial_analyst`.
+- Business Analyst, Operations Analyst, Process Analyst, Performance Analyst, and Business Operations roles use `business_operations_analyst`.
+- Finance Analyst, Economics Analyst, Treasury Analyst, Commercial Finance Analyst, and Junior Commercial Finance Analyst roles use `finance_economics_analyst`.
+
+`ranked_jobs.xlsx`, `quick_apply_jobs.xlsx`, and `application_pack_recommendations.xlsx` show the recommended CV and cover letter filenames. `application_pack_ready=True` means both local files exist. If either file is missing, `application_pack_ready=False` and `missing_application_file_warning` lists the missing file.
+
+Future OpenAI review prompts ask for `cv_category` and `cover_letter_category` from the six category IDs above, but deterministic code mapping remains the fallback when AI output is missing, invalid, or cached from an older run.
 
 Batch AI review is configured as `AI_BATCH_SIZE=10`, `AI_BATCH_MAX_API_CALLS_PER_RUN=10`, and `AI_BATCH_MAX_JOBS_PER_RUN=100`, so one `--ai-review-batch` run can review up to 100 eligible jobs if daily/global quota remains available and the user confirms the API calls. If the network is unstable, run a smaller batch:
 
@@ -447,3 +490,18 @@ Before modifying code:
 
 - Added GitHub privacy safety documentation and a fake `examples/sample_raw_job.txt`.
 - Updated `.gitignore` coverage for private raw/applied/archive/rejected job folders and local generated data.
+
+### 2026-07-16
+
+- Added robust manual raw job traceability with `raw_job_trace_audit.xlsx`, `filtered_jobs.xlsx`, `duplicates.xlsx`, and `parsing_errors.xlsx`.
+- Improved LinkedIn/Indeed-style manual parser handling for `Save {title} at {company}` lines, UI noise, publication-vs-employer confusion, missing fields, and local location extraction.
+- Expanded role-family recognition for BI, reporting, officer, executive, insight, business operations, HR business analyst, finance, and commercial analyst variants.
+- Added deterministic component scoring for eligibility, title/role family, technical fit, direct and transferable experience, location, salary, career value, role level, and gap penalties.
+- Relaxed manual contract/FTC handling so fixed-term wording is reviewable rather than silently excluded; day-rate/IR35-style roles remain strict exclusions.
+- Added regression tests for the five missing-job scenarios and parser/audit edge cases.
+
+### 2026-07-18
+
+- Updated application-material mapping to the six two-page ATS CV categories and matching ATS cover letter categories.
+- Added `application_pack_ready`, missing-file warnings, and `output/application_pack_recommendations.xlsx`.
+- Updated future AI review prompts to request `cv_category` and `cover_letter_category` while keeping deterministic fallback mapping.

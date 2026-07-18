@@ -46,6 +46,8 @@ CACHE_COLUMNS = [
     "missing_requirements",
     "recommended_cv",
     "recommended_cover_letter",
+    "cv_category",
+    "cover_letter_category",
     "cover_letter_angle",
     "model_used",
     "cache_version",
@@ -78,7 +80,25 @@ AI_OUTPUT_COLUMNS = [
     "ai_review_source",
     "source_priority",
     "ai_review_priority_reason",
+    "cv_category",
+    "cover_letter_category",
 ]
+
+VALID_APPLICATION_MATERIAL_CATEGORIES = [
+    "business_intelligence_officer",
+    "data_analyst",
+    "bi_reporting_mi_analyst",
+    "commercial_analyst",
+    "business_operations_analyst",
+    "finance_economics_analyst",
+]
+
+
+def normalize_application_material_category(value):
+    text = str(value or "").strip().lower()
+    text = "".join(character if character.isalnum() else "_" for character in text)
+    text = "_".join(part for part in text.split("_") if part)
+    return text if text in VALID_APPLICATION_MATERIAL_CATEGORIES else ""
 
 
 def cfg(name, default):
@@ -591,10 +611,12 @@ def build_prompt(job, description):
         "temporary, training-course, senior, data-engineer, or domain-specific specialist roles. "
         "Return only valid JSON with these keys: ai_final_action, ai_fit_score, junior_realism, "
         "skill_fit, location_fit, domain_fit, ai_main_reason, ai_red_flags, missing_requirements, "
-        "recommended_cv, recommended_cover_letter, cover_letter_angle. "
+        "recommended_cv, recommended_cover_letter, cv_category, cover_letter_category, cover_letter_angle. "
         "ai_final_action must be one of Apply Today, Strong Consider, Apply If Time, Consider, Low Priority, Skip, Manual Review. "
         "ai_fit_score must be an integer from 0 to 100. Apply Today normally requires 80+, "
         "Strong Consider normally requires 70+, Apply If Time normally requires 60+, Manual Review is for 50-59 or ambiguity. "
+        "cv_category and cover_letter_category must be one of: business_intelligence_officer, data_analyst, "
+        "bi_reporting_mi_analyst, commercial_analyst, business_operations_analyst, finance_economics_analyst. "
         "If the score and action do not align, use Manual Review. "
         "Do not give generic reasons. ai_main_reason must be one short, specific sentence based on the job description. "
         "It should mention concrete evidence such as graduate/junior/trainee wording, the exact location or hybrid/remote pattern, "
@@ -688,11 +710,15 @@ def build_batch_prompt(batch_jobs):
         '"junior_realism":"High | Medium | Low","skill_fit":"High | Medium | Low","location_fit":"High | Medium | Low",'
         '"domain_fit":"High | Medium | Low","ai_main_reason":"string","ai_red_flags":["string"],'
         '"missing_requirements":["string"],"recommended_cv":"string","recommended_cover_letter":"string",'
+        '"cv_category":"business_intelligence_officer | data_analyst | bi_reporting_mi_analyst | commercial_analyst | business_operations_analyst | finance_economics_analyst",'
+        '"cover_letter_category":"business_intelligence_officer | data_analyst | bi_reporting_mi_analyst | commercial_analyst | business_operations_analyst | finance_economics_analyst",'
         '"cover_letter_angle":"string"}]}. '
         "Use 0-100 scoring only: 90-100 Excellent/Apply Today, 80-89 Very strong/Apply Today or Strong Consider, "
         "70-79 Good/Strong Consider, 60-69 Borderline/Apply If Time or Consider, 50-59 Manual Review, 0-49 Skip or Low Priority. "
         "Do not use 1-10 scale. ai_main_reason must cite concrete JD evidence such as location/hybrid pattern, salary, "
         "Excel/SQL/Power BI/dashboard/reporting/KPI/data quality, graduate/junior wording, domain risk, or experience risk. "
+        "For cv_category and cover_letter_category choose from exactly these six categories: business_intelligence_officer, "
+        "data_analyst, bi_reporting_mi_analyst, commercial_analyst, business_operations_analyst, finance_economics_analyst. "
         "Skip clearly unsuitable contract, training-course, senior, non-data, pure admin/sales, or impossible domain-specific roles.\n\n"
         f"User profile:\n{json.dumps(profile, ensure_ascii=False)}\n\n"
         f"Jobs:\n{json.dumps(batch_jobs, ensure_ascii=False)}"
@@ -742,6 +768,10 @@ def clean_ai_result(result, from_cache=False):
     else:
         missing_requirements = str(raw_missing).strip()
     normalized_score_changed = raw_score not in ["", str(score)] and score is not None
+    cv_category = normalize_application_material_category(result.get("cv_category", result.get("recommended_cv", "")))
+    cover_letter_category = normalize_application_material_category(
+        result.get("cover_letter_category", result.get("recommended_cover_letter", ""))
+    )
     inconsistent = (
         score is None
         or invalid_action
@@ -770,6 +800,8 @@ def clean_ai_result(result, from_cache=False):
         "missing_requirements": missing_requirements,
         "recommended_cv": str(result.get("recommended_cv", "")).strip(),
         "recommended_cover_letter": str(result.get("recommended_cover_letter", "")).strip(),
+        "cv_category": cv_category,
+        "cover_letter_category": cover_letter_category,
         "cover_letter_angle": str(result.get("cover_letter_angle", "")).strip(),
         "cache_version": str(get_cache_version()),
         "ai_cache_valid": not inconsistent,
@@ -785,6 +817,10 @@ def apply_cache_result(jobs, row_index, cache_row, source="cache_exact"):
     jobs.at[row_index, "ai_main_reason"] = cache_row.get("ai_main_reason", "")
     jobs.at[row_index, "ai_red_flags"] = cache_row.get("ai_red_flags", "")
     jobs.at[row_index, "ai_review_source"] = source
+    jobs.at[row_index, "cv_category"] = cache_row.get("cv_category", "")
+    jobs.at[row_index, "cover_letter_category"] = cache_row.get("cover_letter_category", "")
+    jobs.at[row_index, "recommended_cv"] = cache_row.get("recommended_cv", "")
+    jobs.at[row_index, "recommended_cover_letter"] = cache_row.get("recommended_cover_letter", "")
 
 
 def apply_review_result(jobs, row_index, result):
@@ -795,6 +831,10 @@ def apply_review_result(jobs, row_index, result):
     jobs.at[row_index, "ai_main_reason"] = result.get("ai_main_reason", "")
     jobs.at[row_index, "ai_red_flags"] = result.get("ai_red_flags", "")
     jobs.at[row_index, "ai_review_source"] = "openai_new"
+    jobs.at[row_index, "cv_category"] = result.get("cv_category", "")
+    jobs.at[row_index, "cover_letter_category"] = result.get("cover_letter_category", "")
+    jobs.at[row_index, "recommended_cv"] = result.get("recommended_cv", "")
+    jobs.at[row_index, "recommended_cover_letter"] = result.get("recommended_cover_letter", "")
 
 
 def description_similarity(left_job, right_job):
@@ -827,6 +867,10 @@ def propagate_review_to_duplicates(jobs, row_index, result, source):
             jobs.at[duplicate_index, "ai_main_reason"] = result.get("ai_main_reason", "")
             jobs.at[duplicate_index, "ai_red_flags"] = result.get("ai_red_flags", "")
             jobs.at[duplicate_index, "ai_review_source"] = source
+            jobs.at[duplicate_index, "cv_category"] = result.get("cv_category", "")
+            jobs.at[duplicate_index, "cover_letter_category"] = result.get("cover_letter_category", "")
+            jobs.at[duplicate_index, "recommended_cv"] = result.get("recommended_cv", "")
+            jobs.at[duplicate_index, "recommended_cover_letter"] = result.get("recommended_cover_letter", "")
 
 
 def make_batch_job_payload(job, description, job_key):
