@@ -250,7 +250,9 @@ Manual full JD jobs use AI fit score thresholds after cache/OpenAI review:
 - `Manual Review`: `50 <= ai_fit_score < 60`
 - `Skip`: `ai_fit_score < 50`
 
-Company website applications use these stricter thresholds because they usually take more time. Manual jobs with low-friction application methods such as LinkedIn Easy Apply, Indeed Apply, Easy Apply, or quick apply keep the same `Apply Today` and `Strong Consider` thresholds, but can become `Apply If Time` from `ai_fit_score >= 55`.
+Company website applications use these stricter thresholds because they usually take more time. Manual jobs with low-friction application methods such as LinkedIn Easy Apply, Indeed Apply, Easy Apply, or quick apply keep the same `Apply Today` and `Strong Consider` thresholds, but can become `Apply If Time` from `ai_fit_score >= 50` when the role is still analyst/data/BI/business/commercial/finance relevant.
+
+Manual jobs in realistically commutable priority locations also use the looser volume tier. Milton Keynes, nearby MK areas, Bedford, Northampton, Luton, Brixworth, realistic drivable towns, Remote UK, and Remote manual jobs can become `Apply If Time` from `ai_fit_score >= 50` when the role is relevant and not a strict exclusion. This reflects the user's preference to apply to low-friction or practical local roles even when the score is not high. Jobs with `ai_fit_score < 50` remain `Skip` unless the AI result is missing/invalid and deterministic fallback is being used for audit visibility.
 
 Low-friction manual jobs get `quick_apply_candidate=True`. `quick_apply_jobs.xlsx` includes quick-apply candidates with `Apply Today`, `Strong Consider`, `Apply If Time`, or `Manual Review` with `ai_fit_score >= 55`, while excluding senior/lead/manager/head/director roles, contract/FTC/day-rate/IR35 roles, clearly non-target roles, far office-based roles, and exact tracker matches.
 
@@ -258,7 +260,7 @@ Low-friction manual jobs get `quick_apply_candidate=True`. `quick_apply_jobs.xls
 
 Manual raw jobs are human-screened before being added, so rule-based filters should be minimal before AI review. AI should decide whether stretch-but-relevant manual jobs become `Apply Today`, `Strong Consider`, `Apply If Time`, `Manual Review`, `Low Priority`, or `Skip`.
 
-Manual raw jobs also receive deterministic component scores so AI failures, missing AI results, malformed AI responses, or low-confidence AI/cache output cannot make a valid job disappear. Component fields include role family, technical match, direct experience, transferable experience, location/commute, salary, career value, role level, gap penalties, final score, recommendation, recommendation reason, and `deterministic_fallback_used`.
+Manual raw jobs also receive deterministic component scores so AI failures, missing AI results, malformed AI responses, or invalid AI/cache output cannot make a valid job disappear. Component fields include role family, technical match, direct experience, transferable experience, location/commute, salary, career value, role level, gap penalties, final score, recommendation, recommendation reason, and `deterministic_fallback_used`. Deterministic fallback must not override a valid OpenAI result that explicitly returns `Skip` with `ai_fit_score < 50`.
 
 Location scoring is intentionally local-first. Milton Keynes and close MK areas receive maximum priority. Bedford, Northampton, Luton, and Brixworth receive very high priority. Nearby drivable towns receive positive scores. London is assessed with commute and office-day caution rather than automatically outranking local roles by salary.
 
@@ -272,12 +274,12 @@ The assistant recommends local two-page ATS CV files and matching ATS cover lett
 
 Application material categories:
 
-- `business_intelligence_officer`: `cv_two_page_business_intelligence_officer.docx` and `cover_letter_business_intelligence_officer_ats.docx`
-- `data_analyst`: `cv_two_page_data_analyst.docx` and `cover_letter_data_analyst_ats.docx`
-- `bi_reporting_mi_analyst`: `cv_two_page_bi_reporting_mi_analyst.docx` and `cover_letter_bi_reporting_mi_analyst_ats.docx`
-- `commercial_analyst`: `cv_two_page_commercial_analyst.docx` and `cover_letter_commercial_analyst_ats.docx`
-- `business_operations_analyst`: `cv_two_page_business_operations_analyst.docx` and `cover_letter_business_operations_analyst_ats.docx`
-- `finance_economics_analyst`: `cv_two_page_finance_economics_analyst.docx` and `cover_letter_finance_economics_analyst_ats.docx`
+- `business_intelligence_officer`: `cv_business_intelligence_officer.docx` and `cover_letter_business_intelligence_officer_ats.docx`
+- `data_analyst`: `cv_data_analyst.docx` and `cover_letter_data_analyst_ats.docx`
+- `bi_reporting_mi_analyst`: `cv_bi_reporting_mi_analyst.docx` and `cover_letter_bi_reporting_mi_analyst_ats.docx`
+- `commercial_analyst`: `cv_commercial_analyst.docx` and `cover_letter_commercial_analyst_ats.docx`
+- `business_operations_analyst`: `cv_business_operations_analyst.docx` and `cover_letter_business_operations_analyst_ats.docx`
+- `finance_economics_analyst`: `cv_finance_economics_analyst.docx` and `cover_letter_finance_economics_analyst_ats.docx`
 
 Mapping logic:
 
@@ -290,7 +292,7 @@ Mapping logic:
 
 `ranked_jobs.xlsx`, `quick_apply_jobs.xlsx`, and `application_pack_recommendations.xlsx` show the recommended CV and cover letter filenames. `application_pack_ready=True` means both local files exist. If either file is missing, `application_pack_ready=False` and `missing_application_file_warning` lists the missing file.
 
-Future OpenAI review prompts ask for `cv_category` and `cover_letter_category` from the six category IDs above, but deterministic code mapping remains the fallback when AI output is missing, invalid, or cached from an older run.
+Future OpenAI review prompts ask for `cv_category` and `cover_letter_category` from the six category IDs above, but deterministic code mapping remains the fallback when AI output is missing, invalid, generic, or cached from an older run. If an older AI/cache result only says `data_analyst` but the title clearly maps to a more specific pack, deterministic title mapping can override that generic category.
 
 Batch AI review is configured as `AI_BATCH_SIZE=10`, `AI_BATCH_MAX_API_CALLS_PER_RUN=10`, and `AI_BATCH_MAX_JOBS_PER_RUN=100`, so one `--ai-review-batch` run can review up to 100 eligible jobs if daily/global quota remains available and the user confirms the API calls. If the network is unstable, run a smaller batch:
 
@@ -505,3 +507,10 @@ Before modifying code:
 - Updated application-material mapping to the six two-page ATS CV categories and matching ATS cover letter categories.
 - Added `application_pack_ready`, missing-file warnings, and `output/application_pack_recommendations.xlsx`.
 - Updated future AI review prompts to request `cv_category` and `cover_letter_category` while keeping deterministic fallback mapping.
+
+### 2026-07-21
+
+- Updated application-material mapping to the current local CV filenames in `cvs/`.
+- Lowered the manual `Apply If Time` volume floor to `ai_fit_score >= 50` for relevant low-friction or realistically commutable jobs.
+- Prevented deterministic fallback from upgrading a valid OpenAI `Skip` result with `ai_fit_score < 50`.
+- Let deterministic title/category mapping override generic cached AI `data_analyst` application-material categories when a more specific CV pack is evident.

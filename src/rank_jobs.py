@@ -368,32 +368,32 @@ STRONG_DATA_KEYWORDS = [
 
 APPLICATION_MATERIALS = {
     "business_intelligence_officer": {
-        "cv": "cv_two_page_business_intelligence_officer.docx",
+        "cv": "cv_business_intelligence_officer.docx",
         "cover_letter": "cover_letter_business_intelligence_officer_ats.docx",
         "label": "Business Intelligence Officer",
     },
     "data_analyst": {
-        "cv": "cv_two_page_data_analyst.docx",
+        "cv": "cv_data_analyst.docx",
         "cover_letter": "cover_letter_data_analyst_ats.docx",
         "label": "Data Analyst",
     },
     "bi_reporting_mi_analyst": {
-        "cv": "cv_two_page_bi_reporting_mi_analyst.docx",
+        "cv": "cv_bi_reporting_mi_analyst.docx",
         "cover_letter": "cover_letter_bi_reporting_mi_analyst_ats.docx",
         "label": "BI / Reporting / MI Analyst",
     },
     "commercial_analyst": {
-        "cv": "cv_two_page_commercial_analyst.docx",
+        "cv": "cv_commercial_analyst.docx",
         "cover_letter": "cover_letter_commercial_analyst_ats.docx",
         "label": "Commercial Analyst",
     },
     "business_operations_analyst": {
-        "cv": "cv_two_page_business_operations_analyst.docx",
+        "cv": "cv_business_operations_analyst.docx",
         "cover_letter": "cover_letter_business_operations_analyst_ats.docx",
         "label": "Business Operations Analyst",
     },
     "finance_economics_analyst": {
-        "cv": "cv_two_page_finance_economics_analyst.docx",
+        "cv": "cv_finance_economics_analyst.docx",
         "cover_letter": "cover_letter_finance_economics_analyst_ats.docx",
         "label": "Finance / Economics Analyst",
     },
@@ -439,7 +439,7 @@ RECOMMENDATION_RULES = [
         "category": "business_intelligence_officer",
         "role_type": "business intelligence officer",
         "title_keywords": ["business intelligence officer", "bi officer", "performance reporting"],
-        "description_keywords": ["council", "local government", "public sector reporting", "statutory data", "business intelligence"],
+        "description_keywords": ["council", "local government", "public sector reporting", "statutory data"],
     },
     {
         "category": "data_analyst",
@@ -2249,6 +2249,44 @@ def is_quick_apply_candidate(job):
     return is_manual_job(job) and is_low_friction_apply_method(job)
 
 
+def is_priority_commutable_manual_job(job):
+    """Manual jobs in local/realistic commute locations can use the volume tier."""
+    if not is_manual_job(job):
+        return False
+    return get_location_tier(job) in [
+        "Remote UK",
+        "Remote",
+        "Tier 1 - Milton Keynes",
+        "Tier 2 - very high priority commute",
+        "Tier 3 - drivable commute",
+    ]
+
+
+def is_target_relevant_manual_job(job):
+    """Keep low-friction/local volume to relevant analyst-adjacent roles only."""
+    if not is_manual_job(job):
+        return False
+    if is_clearly_non_target_manual_role(job) or has_irrelevant_title_without_data(job):
+        return False
+    text = f"{job.get('job_title', '')}\n{job.get('job_text', '')}\n{job.get('job_description', '')}"
+    return (
+        has_target_title_keyword(job.get("job_title", ""))
+        or classify_role_family(job) != "Non-target/unknown"
+        or has_strong_data_keywords(text)
+    )
+
+
+def is_low_friction_or_commutable_volume_candidate(job):
+    """Jobs that are cheap/practical to apply for can use a looser Apply If Time floor."""
+    return (
+        is_manual_job(job)
+        and (is_quick_apply_candidate(job) or is_priority_commutable_manual_job(job))
+        and is_target_relevant_manual_job(job)
+        and not is_contract_or_temporary_role(job)
+        and not has_senior_leadership_title(job)
+    )
+
+
 def is_quick_apply_output_candidate(job):
     if not is_quick_apply_candidate(job):
         return False
@@ -2407,7 +2445,7 @@ def get_manual_final_action_from_ai_score(job):
         return "Apply Today"
     if score >= 70:
         return "Strong Consider"
-    if is_quick_apply_candidate(job) and score >= 55:
+    if is_low_friction_or_commutable_volume_candidate(job) and score >= 50:
         return "Apply If Time"
     if score >= 60:
         return "Apply If Time"
@@ -2431,7 +2469,7 @@ def has_ai_review_inconsistency(job):
     score = get_ai_fit_score(job)
     if score is None:
         return True
-    apply_if_time_floor = 55 if is_quick_apply_candidate(job) else 60
+    apply_if_time_floor = 50 if is_low_friction_or_commutable_volume_candidate(job) else 60
     return (
         (action == "Apply Today" and score < 80)
         or (action == "Strong Consider" and score < 70)
@@ -2668,9 +2706,12 @@ def material_files_for_category(category):
 
 def get_application_material_category(job_title, job_description, company="", ai_category=""):
     ai_category = normalize_application_category(ai_category)
-    if ai_category:
-        return ai_category, f"AI category selected: {ai_category}"
     rule, reason = find_best_recommendation_rule(job_title, job_description, company)
+    deterministic_category = rule["category"]
+    if ai_category:
+        if ai_category == "data_analyst" and deterministic_category != "data_analyst":
+            return deterministic_category, f"{reason}; deterministic category used over generic AI data_analyst"
+        return ai_category, f"AI category selected: {ai_category}"
     return rule["category"], reason
 
 
@@ -3648,16 +3689,25 @@ def apply_ai_decisions_to_final_action(jobs):
 
 
 def apply_manual_component_fallback(jobs):
-    """Keep strong/uncertain manual roles visible when AI is missing or overly conservative."""
+    """Keep strong/uncertain manual roles visible when AI is missing or invalid."""
     jobs = jobs.copy()
     manual_mask = jobs.apply(is_manual_job, axis=1)
     hard_skip_mask = jobs["hard_skip_reason"].astype(str).str.strip().ne("")
+    valid_ai_decision_mask = jobs.apply(has_valid_ai_decision, axis=1)
+    ai_red_flags = jobs["ai_red_flags"] if "ai_red_flags" in jobs.columns else pd.Series("", index=jobs.index)
+    ai_cache_invalid_mask = ai_red_flags.astype(str).str.contains(
+        "AI cache invalid; using rule-based fallback",
+        regex=False,
+        na=False,
+    )
+    fallback_allowed_mask = ~valid_ai_decision_mask | ai_cache_invalid_mask
     if "deterministic_fallback_used" not in jobs.columns:
         jobs["deterministic_fallback_used"] = False
 
     strong_apply_mask = (
         manual_mask
         & ~hard_skip_mask
+        & fallback_allowed_mask
         & jobs["recommendation"].eq("APPLY")
         & jobs["final_action"].isin(["Skip", "Low Priority", "Pending AI Review", "Manual Review"])
     )
@@ -3674,6 +3724,7 @@ def apply_manual_component_fallback(jobs):
     review_mask = (
         manual_mask
         & ~hard_skip_mask
+        & fallback_allowed_mask
         & jobs["recommendation"].isin(["HIGH-PRIORITY MANUAL REVIEW", "MANUAL REVIEW", "STRETCH", "LOW SALARY REVIEW"])
         & jobs["final_action"].isin(["Skip", "Low Priority", "Pending AI Review"])
     )

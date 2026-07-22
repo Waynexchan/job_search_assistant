@@ -12,7 +12,10 @@ from src.rank_jobs import (
     extract_manual_title,
     get_hard_skip_reason,
     get_location_tier,
+    get_manual_final_action_from_ai_score,
+    material_files_for_category,
     parse_job_file,
+    recommend_application_materials,
     split_manual_job_blocks,
 )
 
@@ -172,6 +175,34 @@ class RawJobPipelineRegressionTests(unittest.TestCase):
         updated = apply_manual_component_fallback(df).iloc[0]
         self.assertIn(updated["final_action"], ["Apply If Time", "Manual Review"])
         self.assertTrue(bool(updated["deterministic_fallback_used"]))
+
+    def test_valid_ai_skip_low_score_is_not_rescued_by_deterministic_fallback(self):
+        row = self.score_one(parse_text("Save Data Analyst at Example Co\nMilton Keynes\nSQL Power BI Excel dashboards reporting data validation."))
+        df = pd.DataFrame([row]).fillna("")
+        df["final_action"] = "Skip"
+        df["final_action_reason"] = "manual AI score 25; threshold action Skip"
+        df["hard_skip_reason"] = ""
+        df["ai_final_action"] = "Skip"
+        df["ai_fit_score"] = 25
+        df["ai_review_source"] = "openai_new"
+        df["ai_red_flags"] = ""
+        updated = apply_manual_component_fallback(df).iloc[0]
+        self.assertEqual(updated["final_action"], "Skip")
+        self.assertFalse(bool(updated["deterministic_fallback_used"]))
+
+    def test_local_relevant_manual_job_can_be_apply_if_time_from_score_50(self):
+        row = self.score_one(parse_text("Save Reporting Analyst at Local Co\nMilton Keynes\nExcel reporting dashboards stakeholder updates."))
+        row["ai_fit_score"] = 50
+        self.assertEqual(get_manual_final_action_from_ai_score(row), "Apply If Time")
+
+    def test_application_materials_use_current_cv_filenames_and_specific_category(self):
+        cv, cover_letter = material_files_for_category("business_operations_analyst")
+        self.assertEqual(cv, "cv_business_operations_analyst.docx")
+        self.assertEqual(cover_letter, "cover_letter_business_operations_analyst_ats.docx")
+        row = parse_text("Save Junior Business Analyst at Example Co\nMilton Keynes\nRequirements, UAT, process improvement and reporting.")
+        materials = recommend_application_materials(row)
+        self.assertEqual(materials["cv_category"], "business_operations_analyst")
+        self.assertEqual(materials["recommended_cv"], "cv_business_operations_analyst.docx")
 
 
 if __name__ == "__main__":
